@@ -57,9 +57,58 @@ func NewEthWSProber(reg *backend.Registry, h *Registry) *EthWSProber {
 	}
 }
 
-// Run blocks until ctx is cancelled. Real implementation lands in Task 5.
+// Run blocks until ctx is cancelled, maintaining one trackOne goroutine
+// per backend that has an eth_ws endpoint. Backends added or removed via
+// registry.Set are picked up within p.refresh.
 func (p *EthWSProber) Run(ctx context.Context) {
-	<-ctx.Done()
+	type runner struct {
+		cancel context.CancelFunc
+		ep     string
+	}
+	runners := map[string]runner{}
+
+	reconcile := func() {
+		seen := map[string]bool{}
+		for _, b := range p.registry.Snapshot() {
+			ep := b.Endpoint(types.ProtoEthWS)
+			if ep == "" {
+				continue
+			}
+			seen[b.Name] = true
+			if r, ok := runners[b.Name]; ok {
+				if r.ep == ep {
+					continue
+				}
+				// Endpoint changed under us — restart the tracker.
+				r.cancel()
+			}
+			bctx, cancel := context.WithCancel(ctx)
+			runners[b.Name] = runner{cancel: cancel, ep: ep}
+			name := b.Name
+			go p.trackOne(bctx, name, ep)
+		}
+		for name, r := range runners {
+			if !seen[name] {
+				r.cancel()
+				delete(runners, name)
+			}
+		}
+	}
+
+	reconcile()
+	t := time.NewTicker(p.refresh)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			for _, r := range runners {
+				r.cancel()
+			}
+			return
+		case <-t.C:
+			reconcile()
+		}
+	}
 }
 
 // trackOne maintains a single backend's head subscription, reconnecting

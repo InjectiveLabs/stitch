@@ -254,3 +254,61 @@ func TestEthWSProberReconnectAfterDrop(t *testing.T) {
 
 	cancel()
 }
+
+func TestEthWSProberBackendChurn(t *testing.T) {
+	a := newWSBackendMock(t)
+	b := newWSBackendMock(t)
+
+	// Start with just "alpha".
+	bs := []*backend.Backend{{
+		Name:      "alpha",
+		Endpoints: map[types.Protocol]string{types.ProtoEthWS: a.URL()},
+	}}
+	reg := backend.NewRegistry(bs)
+	h := NewRegistry()
+	p := NewEthWSProber(reg, h)
+	p.refresh = 100 * time.Millisecond
+	p.baseBackoff = 50 * time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go p.Run(ctx)
+
+	// alpha gets subscribed.
+	waitAck := func(m *wsBackendMock, want int64) {
+		deadline := time.After(2 * time.Second)
+		for m.subAcked.Load() < want {
+			select {
+			case <-deadline:
+				t.Fatalf("expected %d acks on mock, got %d", want, m.subAcked.Load())
+			case <-time.After(10 * time.Millisecond):
+			}
+		}
+	}
+	waitAck(a, 1)
+
+	// Add "beta" via Set; expect a new tracker within ~refresh.
+	reg.Set([]*backend.Backend{
+		{Name: "alpha", Endpoints: map[types.Protocol]string{types.ProtoEthWS: a.URL()}},
+		{Name: "beta", Endpoints: map[types.Protocol]string{types.ProtoEthWS: b.URL()}},
+	})
+	waitAck(b, 1)
+
+	// Remove "alpha" via Set. After a reconciliation tick, alpha's tracker
+	// must exit; emitting on the killed conn doesn't matter, but a second
+	// removal-driven cancel shouldn't reconnect. We assert by closing the
+	// remaining alpha conn and confirming subAcked does NOT advance further.
+	reg.Set([]*backend.Backend{
+		{Name: "beta", Endpoints: map[types.Protocol]string{types.ProtoEthWS: b.URL()}},
+	})
+	// Give the prober a couple of refresh cycles to notice the removal.
+	time.Sleep(300 * time.Millisecond)
+	a.killOldestConn(t)
+	startAcks := a.subAcked.Load()
+	time.Sleep(300 * time.Millisecond)
+	if got := a.subAcked.Load(); got > startAcks {
+		t.Errorf("alpha tracker still reconnecting after removal: acks %d -> %d", startAcks, got)
+	}
+
+	cancel()
+}
