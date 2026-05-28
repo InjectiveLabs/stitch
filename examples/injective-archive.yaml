@@ -1,0 +1,64 @@
+# Single Injective archive node behind the full stitch listener stack.
+#
+# This is the simplest production-shaped config: one beefy archive,
+# every protocol exposed, response cache enabled, dangerous methods
+# default-denied. Front it with TLS and your own auth proxy.
+
+listen:
+  rpc:         { addr: "0.0.0.0:5001" }   # CometBFT URI + JSON-RPC
+  grpc:        { addr: "0.0.0.0:5002" }   # Cosmos gRPC + gRPC-Web
+  api:         { addr: "0.0.0.0:5003" }   # Cosmos REST / gRPC-Gateway
+  eth_rpc:     { addr: "0.0.0.0:5005" }   # EVM JSON-RPC HTTP
+  eth_ws:      { addr: "0.0.0.0:5006" }   # EVM JSON-RPC WebSocket
+  chainstream: { addr: "0.0.0.0:5007" }   # injective.stream.v* gRPC
+  inj_ws:      { addr: "0.0.0.0:5008" }   # /injstream-ws JSON-RPC bridge
+  admin:       { addr: "127.0.0.1:9091" } # localhost-only admin API
+
+log:
+  level: info
+  format: json
+
+policies:
+  failover:
+    max_attempts: 3
+    per_attempt_timeout: 5s
+  hedging:
+    enabled: true
+    methods: [eth_call, eth_estimateGas, abci_query]
+    after_pct_of_p95: 1.5
+  circuit:
+    error_threshold: 0.5
+    min_requests: 20
+    open_duration: 30s
+  cache:
+    enabled: true
+    confirmation_depth: 100   # finalized = head − 100
+    l1_size_mb: 1024
+  health:
+    probe_interval: 5s
+    max_lag_blocks: 50
+  subscriptions:
+    multicast: true
+    slow_consumer: drop
+    replay_timeout: 30s
+
+  # Most operators want these methods off in production.
+  # Uncomment to expose specific ones.
+  dangerous_methods:
+    allow: []
+    # allow:
+    #   - debug_traceCall
+    #   - debug_traceTransaction
+
+backends:
+  - name: archive-1
+    coverage: { kind: archive }
+    weight: 100
+    tags: [archive, primary]
+    endpoints:
+      rpc:         ${ARCHIVE_RPC_URL}
+      grpc:        ${ARCHIVE_GRPC_URL}
+      api:         ${ARCHIVE_API_URL}
+      eth_rpc:     ${ARCHIVE_ETH_RPC_URL}
+      eth_ws:      ${ARCHIVE_ETH_WS_URL}
+      chainstream: ${ARCHIVE_CHAINSTREAM_URL}

@@ -1,0 +1,129 @@
+// Package eth_ws is the EVM JSON-RPC WebSocket listener.
+//
+// As of Phase 5a, every accepted connection is delegated to a
+// subscription.Session, which:
+//
+//   - relays non-subscribe JSON-RPC frames verbatim
+//   - intercepts eth_subscribe / eth_unsubscribe to mint synthetic
+//     subscription IDs, hiding upstream restarts from clients
+//   - on upstream failure, re-dials a candidate, re-issues the active
+//     resumable subscriptions, and dedupes events with cursor ≤ last
+//     delivered (no duplicates, no client-visible reconnect)
+//
+// `newPendingTransactions` is mempool-local — flagged non-resumable; the
+// session terminates instead of forging continuity that doesn't exist.
+package eth_ws
+
+import (
+	"context"
+	"errors"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/gorilla/websocket"
+
+	"github.com/decentrio/stitch/internal/log"
+	"github.com/decentrio/stitch/internal/runtime"
+	"github.com/decentrio/stitch/internal/selector"
+	"github.com/decentrio/stitch/internal/subscription"
+	"github.com/decentrio/stitch/internal/types"
+)
+
+// Server is the EVM WebSocket listener.
+type Server struct {
+	addr     string
+	selector selector.Selector
+	upgrader websocket.Upgrader
+	dialer   *websocket.Dialer
+	srv      *http.Server
+}
+
+func New(addr string, sel selector.Selector) *Server {
+	s := &Server{
+		addr:     addr,
+		selector: sel,
+		upgrader: websocket.Upgrader{
+			ReadBufferSize:  4096,
+			WriteBufferSize: 4096,
+			CheckOrigin:     func(*http.Request) bool { return true }, // operators put TLS/auth in front
+		},
+		dialer: &websocket.Dialer{
+			HandshakeTimeout: 5 * time.Second,
+			ReadBufferSize:   4096,
+			WriteBufferSize:  4096,
+		},
+	}
+	s.srv = &http.Server{
+		Addr:              addr,
+		Handler:           s,
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+	return s
+}
+
+func (s *Server) Name() string { return "eth_ws" }
+
+func (s *Server) Start(_ context.Context) error {
+	log.L().Info("eth_ws: listening", "addr", s.addr)
+	if err := s.srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return err
+	}
+	return nil
+}
+
+func (s *Server) Shutdown(ctx context.Context) error { return s.srv.Shutdown(ctx) }
+
+// Handler returns the underlying http.Handler — useful for tests.
+func (s *Server) Handler() http.Handler { return s.srv.Handler }
+
+// ServeHTTP performs the WS handshake, then hands the client connection
+// off to a subscription Session.
+func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	rid := runtime.NewRequestID()
+	ctx := log.WithRequestID(r.Context(), rid)
+	ctx = log.WithProtocol(ctx, string(types.ProtoEthWS))
+	w.Header().Set("x-request-id", rid)
+
+	// Pre-flight: refuse if no backend has eth_ws so the client gets a
+	// proper HTTP error rather than a 1011 close after the upgrade.
+	candidates := s.selector.Candidates(types.RouteKey{
+		Protocol: types.ProtoEthWS,
+		Method:   "preflight",
+		Class:    types.ClassLatest,
+	})
+	if len(candidates) == 0 {
+		http.Error(w, "no eligible backend for eth_ws", http.StatusServiceUnavailable)
+		return
+	}
+
+	clientConn, err := s.upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.FromCtx(ctx).Warn("eth_ws: upgrade failed", "err", err.Error())
+		return
+	}
+
+	sess := subscription.NewSession(clientConn, subscription.SessionConfig{
+		Selector: s.selector,
+		Dialer:   s.dialer,
+	})
+	if err := sess.Run(ctx); err != nil {
+		log.FromCtx(ctx).Debug("eth_ws: session ended", "err", err.Error())
+	}
+}
+
+// upstreamURL is preserved for the legacy test that asserts URL
+// normalization. Session.normalizeWS is the one that gets used at
+// runtime.
+func upstreamURL(s string) string {
+	switch {
+	case strings.HasPrefix(s, "ws://"), strings.HasPrefix(s, "wss://"):
+		return s
+	case strings.HasPrefix(s, "http://"):
+		return "ws://" + strings.TrimPrefix(s, "http://")
+	case strings.HasPrefix(s, "https://"):
+		return "wss://" + strings.TrimPrefix(s, "https://")
+	default:
+		return s
+	}
+}

@@ -1,0 +1,96 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build & test
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        go: ["1.21", "1.22", "1.23"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+          cache: true
+
+      - name: go mod download
+        run: go mod download
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: build
+        run: go build -mod=readonly -o /tmp/stitch ./cmd/stitch
+
+      - name: test
+        run: go test -mod=readonly -timeout=5m ./...
+
+  race:
+    name: race detector
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          cache: true
+      - name: test -race
+        run: go test -race -count=1 -timeout=10m ./...
+
+  lint:
+    name: golangci-lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          cache: true
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+          args: --timeout=5m
+
+  example-configs:
+    name: example configs validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          cache: true
+      - name: build stitch
+        run: go build -mod=readonly -o /tmp/stitch ./cmd/stitch
+      - name: validate each example loads
+        run: |
+          set -e
+          export ARCHIVE_RPC_URL=http://x:26657
+          export ARCHIVE_GRPC_URL=x:9900
+          export ARCHIVE_API_URL=http://x:1317
+          export ARCHIVE_ETH_RPC_URL=http://x:8545
+          export ARCHIVE_ETH_WS_URL=ws://x:8546
+          export ARCHIVE_CHAINSTREAM_URL=x:9999
+          export HOT_RPC_URL=http://x:26657
+          export HOT_GRPC_URL=x:9900
+          export HOT_API_URL=http://x:1317
+          export HOT_ETH_RPC_URL=http://x:8545
+          export HOT_ETH_WS_URL=ws://x:8546
+          for f in examples/*.yaml; do
+            [ "$f" = "examples/docker-compose.yaml" ] && continue
+            echo "loading $f"
+            timeout 3s /tmp/stitch start --config "$f" --shutdown-grace 1s || rc=$?
+            # graceful shutdown after timeout = 0 or 124; anything else is a real failure
+            [ "$rc" = "124" ] || [ "$rc" = "0" ] || [ -z "$rc" ] || { echo "FAIL: $f exited $rc"; exit 1; }
+          done

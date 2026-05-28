@@ -1,0 +1,86 @@
+# HA across two regions. Two archive nodes (primary + DR), each with
+# its own pruned hot tier. Tags let you drain a whole region for
+# maintenance via the admin API:
+#
+#   curl -X POST http://localhost:9091/admin/backends/primary-archive/drain
+#   curl -X POST http://localhost:9091/admin/backends/primary-hot/drain
+#
+# Weights bias normal traffic to the primary region; the DR region
+# takes over automatically if both primary backends fail health checks
+# or trip their circuit breakers.
+
+listen:
+  rpc:     { addr: "0.0.0.0:5001" }
+  grpc:    { addr: "0.0.0.0:5002" }
+  api:     { addr: "0.0.0.0:5003" }
+  eth_rpc: { addr: "0.0.0.0:5005" }
+  eth_ws:  { addr: "0.0.0.0:5006" }
+  admin:   { addr: "127.0.0.1:9091" }
+
+log:
+  level: info
+  format: json
+
+policies:
+  failover:
+    max_attempts: 4         # primary-hot → DR-hot → primary-archive → DR-archive
+    per_attempt_timeout: 5s
+  hedging:
+    enabled: true
+    methods: [eth_call, abci_query]
+  circuit:
+    error_threshold: 0.5
+    min_requests: 20
+    open_duration: 30s
+  cache:
+    enabled: true
+    confirmation_depth: 100
+    l1_size_mb: 2048
+  health:
+    probe_interval: 5s
+    max_lag_blocks: 50
+
+backends:
+  # ----- Primary region -----
+  - name: primary-hot
+    coverage: { kind: pruned, keep: 100000 }
+    weight: 200             # preferred for "latest" reads
+    tags: [region:us-east-1, hot]
+    endpoints:
+      rpc:     http://hot-1.us-east-1.internal:26657
+      grpc:    hot-1.us-east-1.internal:9900
+      api:     http://hot-1.us-east-1.internal:1317
+      eth_rpc: http://hot-1.us-east-1.internal:8545
+      eth_ws:  ws://hot-1.us-east-1.internal:8546
+
+  - name: primary-archive
+    coverage: { kind: archive }
+    weight: 100
+    tags: [region:us-east-1, archive]
+    endpoints:
+      rpc:     http://archive-1.us-east-1.internal:26657
+      grpc:    archive-1.us-east-1.internal:9900
+      api:     http://archive-1.us-east-1.internal:1317
+      eth_rpc: http://archive-1.us-east-1.internal:8545
+
+  # ----- DR region -----
+  - name: dr-hot
+    coverage: { kind: pruned, keep: 100000 }
+    weight: 100             # half-weight: only used on primary failure
+    tags: [region:us-west-2, hot]
+    endpoints:
+      rpc:     http://hot-1.us-west-2.internal:26657
+      grpc:    hot-1.us-west-2.internal:9900
+      api:     http://hot-1.us-west-2.internal:1317
+      eth_rpc: http://hot-1.us-west-2.internal:8545
+      eth_ws:  ws://hot-1.us-west-2.internal:8546
+
+  - name: dr-archive
+    coverage: { kind: archive }
+    weight: 50
+    tags: [region:us-west-2, archive]
+    endpoints:
+      rpc:     http://archive-1.us-west-2.internal:26657
+      grpc:    archive-1.us-west-2.internal:9900
+      api:     http://archive-1.us-west-2.internal:1317
+      eth_rpc: http://archive-1.us-west-2.internal:8545

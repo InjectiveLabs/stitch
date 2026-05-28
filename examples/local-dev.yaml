@@ -1,0 +1,37 @@
+# Minimal local-dev config: one upstream on localhost, RPC + admin only.
+#
+# Use this when you have a Cosmos node running locally and want to put
+# stitch in front for testing. No caching, short circuit windows so you
+# see failures fast.
+
+listen:
+  rpc:    { addr: "127.0.0.1:5001" }
+  admin:  { addr: "127.0.0.1:9091" }
+
+log:
+  level: debug
+  format: text
+
+policies:
+  failover:
+    max_attempts: 1            # single backend; nothing to fail over to
+    per_attempt_timeout: 2s
+  circuit:
+    error_threshold: 0.5
+    min_requests: 4
+    open_duration: 5s
+  health:
+    probe_interval: 1s
+    max_lag_blocks: 0          # accept any lag locally
+  cache:
+    enabled: false             # no need locally
+  subscriptions:
+    multicast: true
+    slow_consumer: drop
+
+backends:
+  - name: localhost
+    coverage: { kind: archive }
+    weight: 100
+    endpoints:
+      rpc: http://127.0.0.1:26657

@@ -1,0 +1,65 @@
+# --- Build artifacts ---
+build/
+dist/
+*.exe
+*.exe~
+*.test
+*.out
+*.prof
+coverage.out
+coverage.html
+
+# --- Go workspace files (developer-local) ---
+go.work
+go.work.sum
+vendor/
+
+# --- Operator-specific configs ---
+# Checked-in examples/*.yaml are templates. Operators customize and
+# save as *.local.yaml so real IPs and secrets don't leak.
+config.yaml
+config.local.yaml
+examples/*.local.yaml
+
+# --- Secrets ---
+.env
+.env.*
+!.env.example
+.envrc
+
+# --- Logs and runtime state ---
+*.log
+*.pid
+*.sock
+
+# --- IDE / editor ---
+.idea/
+.vscode/
+*.code-workspace
+*.iml
+.project
+.classpath
+.settings/
+*.swp
+*.swo
+*~
+
+# --- OS junk ---
+.DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db
+ehthumbs.db
+desktop.ini
+.Spotlight-V100
+.Trashes
+
+# --- Docker / k8s overlays you don't want checked in ---
+docker-compose.override.yml
+docker-compose.override.yaml
+*.kubeconfig
+
+# --- Test scratch / debug dumps ---
+*.test.bin
+*.tmp
+testdata.local/

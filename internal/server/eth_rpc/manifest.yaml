@@ -1,0 +1,139 @@
+# EVM JSON-RPC method manifest.
+#
+# Sourced from injective-core-query-reference.md §3 (eight namespaces:
+# eth, web3, net, txpool, personal, debug, miner, inj). Each entry says:
+#
+#   height: latest          — route to any healthy backend; head suffices
+#   height_param: N         — height lives at params[N]; kind: tells us how to parse
+#   hash_param: N           — hash routing; kind: block_hash or tx_hash
+#   kind: block_number | block_number_or_hash | block_hash | tx_hash
+#   stateless: true         — no upstream call needed (still proxied for now)
+#   broadcast: true         — fan out to all healthy backends (phase 6)
+#   subscription: true      — handled by phase 5 hub; HTTP listener errors
+#   idempotent: false       — never retried on transient failure
+#   cacheable: true         — eligible for cache when finalized (phase 7)
+#   state_override_param: N — eth_call extension; affects cache eligibility
+#   hedge: true             — eligible for hedged dispatch (phase 6)
+#   sticky_filter: true     — (un)install/get methods bound to a backend
+#   follow_id: N            — for sticky_filter: filter id is at params[N]
+#   hidden: true            — not exposed unless admin tier (phase 8)
+
+# ----- eth namespace -------------------------------------------------------
+
+eth_blockNumber:                          { height: latest, idempotent: true }
+eth_chainId:                              { stateless: true, idempotent: true }
+eth_protocolVersion:                      { stateless: true, idempotent: true }
+eth_syncing:                              { height: latest, idempotent: true }
+eth_coinbase:                             { height: latest, idempotent: true }
+eth_accounts:                             { height: latest, idempotent: true }
+eth_gasPrice:                             { height: latest, idempotent: true }
+eth_maxPriorityFeePerGas:                 { height: latest, idempotent: true }
+eth_feeHistory:                           { height_param: 1, kind: block_number, idempotent: true }
+
+eth_getBalance:                           { height_param: 1, kind: block_number_or_hash, idempotent: true, cacheable: true }
+eth_getCode:                              { height_param: 1, kind: block_number_or_hash, idempotent: true, cacheable: true }
+eth_getStorageAt:                         { height_param: 2, kind: block_number_or_hash, idempotent: true, cacheable: true }
+eth_getProof:                             { height_param: 2, kind: block_number_or_hash, idempotent: true, cacheable: true }
+eth_getTransactionCount:                  { height_param: 1, kind: block_number_or_hash, idempotent: true, cacheable: true }
+
+eth_getBlockByNumber:                     { height_param: 0, kind: block_number, idempotent: true, cacheable: true }
+eth_getBlockByHash:                       { hash_param: 0, kind: block_hash, idempotent: true, cacheable: true }
+eth_getBlockTransactionCountByNumber:     { height_param: 0, kind: block_number, idempotent: true }
+eth_getBlockTransactionCountByHash:       { hash_param: 0, kind: block_hash, idempotent: true }
+eth_getBlockReceipts:                     { height_param: 0, kind: block_number_or_hash, idempotent: true, cacheable: true }
+
+eth_getTransactionByHash:                 { hash_param: 0, kind: tx_hash, idempotent: true, cacheable: true }
+eth_getTransactionByBlockNumberAndIndex:  { height_param: 0, kind: block_number, idempotent: true }
+eth_getTransactionByBlockHashAndIndex:    { hash_param: 0, kind: block_hash, idempotent: true }
+eth_getTransactionReceipt:                { hash_param: 0, kind: tx_hash, idempotent: true, cacheable: true }
+eth_getTransactionLogs:                   { hash_param: 0, kind: tx_hash, idempotent: true }
+eth_getPendingTransactions:               { height: latest, idempotent: false }
+
+eth_sendRawTransaction:                   { broadcast: true, idempotent: false }
+eth_sendTransaction:                      { broadcast: true, idempotent: false }
+
+eth_call:                                 { height_param: 1, kind: block_number_or_hash, state_override_param: 2, idempotent: true, hedge: true }
+eth_estimateGas:                          { height_param: 1, kind: block_number, idempotent: true, hedge: true }
+
+eth_sign:                                 { height: latest, idempotent: false }
+eth_signTypedData:                        { height: latest, idempotent: false }
+eth_fillTransaction:                      { height: latest, idempotent: false }
+eth_resend:                               { height: latest, idempotent: false }
+
+eth_hashrate:                             { stateless: true, idempotent: true }
+eth_mining:                               { stateless: true, idempotent: true }
+eth_getUncleByBlockNumberAndIndex:        { stateless: true, idempotent: true }
+eth_getUncleByBlockHashAndIndex:          { stateless: true, idempotent: true }
+eth_getUncleCountByBlockNumber:           { stateless: true, idempotent: true }
+eth_getUncleCountByBlockHash:             { stateless: true, idempotent: true }
+
+# eth filters — sticky to the backend that minted the filter id.
+eth_newBlockFilter:                       { sticky_filter: true, idempotent: false }
+eth_newPendingTransactionFilter:          { sticky_filter: true, idempotent: false }
+eth_newFilter:                            { sticky_filter: true, idempotent: false }
+eth_uninstallFilter:                      { sticky_filter: true, follow_id: 0, idempotent: false }
+eth_getFilterChanges:                     { sticky_filter: true, follow_id: 0, idempotent: true }
+eth_getFilterLogs:                        { sticky_filter: true, follow_id: 0, idempotent: true }
+eth_getLogs:                              { height: latest, idempotent: true, hedge: true }
+
+# eth_subscribe is WebSocket-only; HTTP listener returns an error.
+eth_subscribe:                            { subscription: true }
+eth_unsubscribe:                          { subscription: true }
+
+# ----- web3 ----------------------------------------------------------------
+web3_clientVersion:                       { stateless: true, idempotent: true }
+web3_sha3:                                { stateless: true, idempotent: true }
+
+# ----- net -----------------------------------------------------------------
+net_version:                              { height: latest, idempotent: true }
+net_listening:                            { height: latest, idempotent: true }
+net_peerCount:                            { height: latest, idempotent: true }
+
+# ----- txpool --------------------------------------------------------------
+txpool_content:                           { height: latest, idempotent: true }
+txpool_inspect:                           { height: latest, idempotent: true }
+txpool_status:                            { height: latest, idempotent: true }
+
+# ----- personal (hidden) ---------------------------------------------------
+personal_importRawKey:                    { height: latest, idempotent: false, hidden: true }
+personal_newAccount:                      { height: latest, idempotent: false, hidden: true }
+personal_listAccounts:                    { height: latest, idempotent: true,  hidden: true }
+personal_unlockAccount:                   { height: latest, idempotent: false, hidden: true }
+personal_lockAccount:                     { height: latest, idempotent: false, hidden: true }
+personal_sendTransaction:                 { broadcast: true, idempotent: false, hidden: true }
+personal_sign:                            { height: latest, idempotent: false, hidden: true }
+personal_ecRecover:                       { height: latest, idempotent: true,  hidden: true }
+
+# ----- debug (hidden) ------------------------------------------------------
+debug_traceTransaction:                   { hash_param: 0, kind: tx_hash, idempotent: true, hidden: true, hedge: true }
+debug_traceBlockByNumber:                 { height_param: 0, kind: block_number, idempotent: true, hidden: true }
+debug_traceBlockByHash:                   { hash_param: 0, kind: block_hash, idempotent: true, hidden: true }
+debug_traceCall:                          { height_param: 1, kind: block_number_or_hash, idempotent: true, hidden: true, hedge: true }
+debug_storageRangeAt:                     { height_param: 0, kind: block_number_or_hash, idempotent: true, hidden: true }
+debug_intermediateRoots:                  { hash_param: 0, kind: block_hash, idempotent: true, hidden: true }
+debug_getHeaderRlp:                       { height_param: 0, kind: block_number, idempotent: true, hidden: true }
+debug_getBlockRlp:                        { height_param: 0, kind: block_number, idempotent: true, hidden: true }
+debug_printBlock:                         { height_param: 0, kind: block_number, idempotent: true, hidden: true }
+debug_blockProfile:                       { height: latest, idempotent: false, hidden: true }
+debug_cpuProfile:                         { height: latest, idempotent: false, hidden: true }
+debug_goTrace:                            { height: latest, idempotent: false, hidden: true }
+debug_mutexProfile:                       { height: latest, idempotent: false, hidden: true }
+debug_startCPUProfile:                    { height: latest, idempotent: false, hidden: true }
+debug_stopCPUProfile:                     { height: latest, idempotent: false, hidden: true }
+debug_writeBlockProfile:                  { height: latest, idempotent: false, hidden: true }
+debug_writeMemProfile:                    { height: latest, idempotent: false, hidden: true }
+debug_writeMutexProfile:                  { height: latest, idempotent: false, hidden: true }
+debug_setBlockProfileRate:                { height: latest, idempotent: false, hidden: true }
+debug_setMutexProfileFraction:            { height: latest, idempotent: false, hidden: true }
+debug_setGCPercent:                       { height: latest, idempotent: false, hidden: true }
+debug_freeOSMemory:                       { height: latest, idempotent: false, hidden: true }
+debug_gcStats:                            { height: latest, idempotent: true,  hidden: true }
+debug_memStats:                           { height: latest, idempotent: true,  hidden: true }
+debug_stacks:                             { height: latest, idempotent: true,  hidden: true }
+
+# ----- miner (hidden) ------------------------------------------------------
+miner_setEtherbase:                       { height: latest, idempotent: false, hidden: true }
+miner_setGasPrice:                        { height: latest, idempotent: false, hidden: true }
+
+# ----- inj -----------------------------------------------------------------
+inj_getTxHashByEthHash:                   { hash_param: 0, kind: tx_hash, idempotent: true, cacheable: true }

@@ -1,0 +1,53 @@
+# Minimal docker-compose for stitch + a Cosmos node. Adapt to your
+# actual upstream image (this skeleton just shows wiring).
+#
+# Usage:
+#   cp .env.example .env
+#   docker compose -f examples/docker-compose.yaml up
+
+services:
+  stitch:
+    image: stitch:latest          # build from project root: `docker build -t stitch:latest .`
+    restart: unless-stopped
+    ports:
+      - "5001:5001"               # CometBFT RPC
+      - "5002:5002"               # Cosmos gRPC
+      - "5003:5003"               # Cosmos REST
+      - "5005:5005"               # EVM JSON-RPC
+      - "5006:5006"               # EVM WebSocket
+      - "5007:5007"               # ChainStream gRPC
+      - "5008:5008"               # /injstream-ws
+      - "127.0.0.1:9091:9091"     # admin (loopback only)
+    volumes:
+      - ./examples/injective-archive.yaml:/etc/stitch/config.yaml:ro
+    env_file:
+      - ../.env                   # ARCHIVE_*_URL etc.
+    command:
+      - start
+      - --config
+      - /etc/stitch/config.yaml
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:9091/healthz"]
+      interval: 10s
+      timeout: 2s
+      retries: 3
+      start_period: 5s
+
+  # Replace with your actual injectived / cometbft container.
+  # Stitch's .env.example points ARCHIVE_*_URL at this service's
+  # internal network address.
+  #
+  # injectived:
+  #   image: injectivelabs/injective-core:latest
+  #   ports:
+  #     - "26657"
+  #     - "9900"
+  #     - "1317"
+  #     - "8545"
+  #     - "8546"
+  #     - "9999"
+  #   volumes:
+  #     - injective-data:/root/.injectived
+
+# volumes:
+#   injective-data:

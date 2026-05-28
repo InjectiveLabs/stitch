@@ -1,0 +1,194 @@
+package forwarder
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"sync"
+	"time"
+
+	"github.com/decentrio/stitch/internal/backend"
+	"github.com/decentrio/stitch/internal/log"
+	"github.com/decentrio/stitch/internal/metrics"
+	"github.com/decentrio/stitch/internal/types"
+)
+
+// broadcastResult collects the per-candidate outcome of one Broadcast.
+type broadcastResult struct {
+	backend string
+	resp    *http.Response
+	body    []byte
+	err     error
+}
+
+// Broadcast fans the request out to every healthy candidate in parallel
+// and returns the first successful response to the client. Other
+// in-flight responses are read to completion (so we can credit the
+// circuit breakers) but discarded.
+//
+// Used for tx submission methods like broadcast_tx_*, eth_sendRawTransaction
+// — the upstream mempool dedupes, so duplicate sends are harmless and
+// removing the single-point-of-failure shape is worth the bandwidth.
+func (f *HTTP) Broadcast(w http.ResponseWriter, r *http.Request, key types.RouteKey) {
+	candidates := f.selector.Candidates(key)
+	if len(candidates) == 0 {
+		writeJSONError(w, http.StatusServiceUnavailable, "no eligible backend")
+		metrics.BroadcastFanout.WithLabelValues("no_candidates").Inc()
+		return
+	}
+
+	var bodyBytes []byte
+	if r.Body != nil && r.ContentLength != 0 {
+		var err error
+		bodyBytes, err = io.ReadAll(r.Body)
+		_ = r.Body.Close()
+		if err != nil {
+			writeJSONError(w, http.StatusBadRequest, "read body: "+err.Error())
+			return
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), f.policy.PerAttemptTimeout)
+	defer cancel()
+
+	resCh := make(chan broadcastResult, len(candidates))
+	dispatched := 0
+
+	for _, b := range candidates {
+		if !f.circuit.Allow(b.Name, key.Protocol) {
+			continue
+		}
+		ep := b.Endpoint(key.Protocol)
+		if ep == "" {
+			continue
+		}
+		dispatched++
+		go func(b *backend.Backend, ep string) {
+			resCh <- f.broadcastOne(ctx, r, ep, b.Name, bodyBytes)
+		}(b, ep)
+	}
+
+	if dispatched == 0 {
+		writeJSONError(w, http.StatusServiceUnavailable, "all candidates blocked by circuit breaker")
+		metrics.BroadcastFanout.WithLabelValues("all_circuited").Inc()
+		return
+	}
+
+	// Wait for first success.
+	var winner *broadcastResult
+	failures := []broadcastResult{}
+	for i := 0; i < dispatched; i++ {
+		res := <-resCh
+		if res.err == nil && res.resp != nil && res.resp.StatusCode < 500 {
+			winner = &res
+			f.circuit.Record(res.backend, key.Protocol, true)
+			go f.drainResults(resCh, dispatched-i-1, key.Protocol)
+			break
+		}
+		failures = append(failures, res)
+		f.circuit.Record(res.backend, key.Protocol, false)
+	}
+
+	if winner == nil {
+		// Total failure — pick the most informative error to report.
+		report := pickErrReport(failures)
+		writeJSONError(w, http.StatusBadGateway, report)
+		log.FromCtx(r.Context()).Error("broadcast: all candidates failed",
+			"protocol", string(key.Protocol),
+			"method", key.Method,
+			"dispatched", dispatched,
+			"err", report,
+		)
+		metrics.BroadcastFanout.WithLabelValues("total_failure").Inc()
+		return
+	}
+
+	// Success!
+	cancel()
+	copyHeaders(w.Header(), winner.resp.Header)
+	w.WriteHeader(winner.resp.StatusCode)
+	_, _ = w.Write(winner.body)
+	if len(failures) == 0 {
+		metrics.BroadcastFanout.WithLabelValues("success").Inc()
+	} else {
+		metrics.BroadcastFanout.WithLabelValues("partial").Inc()
+	}
+	metrics.RequestsTotal.WithLabelValues(string(key.Protocol), key.Class.String(), winner.backend, statusBucket(winner.resp.StatusCode)).Inc()
+}
+
+// broadcastOne sends one upstream request and reads the body. The body
+// read happens here so the response can be safely closed before the
+// channel send.
+func (f *HTTP) broadcastOne(ctx context.Context, orig *http.Request, ep, backendName string, body []byte) broadcastResult {
+	out := broadcastResult{backend: backendName}
+
+	url, err := buildUpstreamURL(ep, orig.URL.Path, orig.URL.RawQuery)
+	if err != nil {
+		out.err = err
+		return out
+	}
+	req, err := http.NewRequestWithContext(ctx, orig.Method, url, bytes.NewReader(body))
+	if err != nil {
+		out.err = err
+		return out
+	}
+	copyHeaders(req.Header, orig.Header)
+
+	started := time.Now()
+	client := f.pool.Client(backendName, f.policy.PerAttemptTimeout)
+	resp, err := client.Do(req)
+	dur := time.Since(started)
+	metrics.BackendLatency.WithLabelValues(backendName, "broadcast").Observe(dur.Seconds())
+	if err != nil {
+		out.err = err
+		return out
+	}
+	defer resp.Body.Close()
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		out.err = err
+		return out
+	}
+	out.resp = resp
+	out.body = bodyBytes
+	return out
+}
+
+// drainResults consumes the remaining N results from resCh and records
+// their outcomes against the circuit breaker. Called in a goroutine
+// after a winner has already been declared.
+func (f *HTTP) drainResults(resCh <-chan broadcastResult, n int, p types.Protocol) {
+	for i := 0; i < n; i++ {
+		res := <-resCh
+		if res.err != nil || (res.resp != nil && res.resp.StatusCode >= 500) {
+			f.circuit.Record(res.backend, p, false)
+		} else {
+			f.circuit.Record(res.backend, p, true)
+		}
+	}
+}
+
+func pickErrReport(failures []broadcastResult) string {
+	if len(failures) == 0 {
+		return "no upstream attempts"
+	}
+	// Prefer transport errors (most informative); fall back to first 5xx.
+	for _, f := range failures {
+		if f.err != nil && !errors.Is(f.err, context.Canceled) {
+			return fmt.Sprintf("backend %s: %v", f.backend, f.err)
+		}
+	}
+	for _, f := range failures {
+		if f.resp != nil {
+			return fmt.Sprintf("backend %s: status %d", f.backend, f.resp.StatusCode)
+		}
+	}
+	return "all upstream attempts failed"
+}
+
+// Compile-time anchor; keeps the sync import used if drainResults is
+// future-elaborated to track wait groups.
+var _ = sync.Mutex{}

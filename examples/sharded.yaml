@@ -1,0 +1,97 @@
+# Sharded archive: deep history split across two bounded shards plus a
+# hot pruned tip for cheap "latest" reads.
+#
+# Routing examples with this config:
+#   - block 12,345         → shard-1 (covers 1..50_000_000)
+#   - block 60,000,000     → shard-2 (covers 50_000_001..head)
+#   - block latest         → hot-tip (cheapest backend that follows head)
+#   - eth_getBlockByHash   → first cache hit; on miss, fan out
+#
+# Stitch's selector prefers narrower coverage when multiple backends
+# qualify, so the archive is only touched when nothing else has the
+# data. This keeps your archive's IO budget for what actually needs it.
+
+listen:
+  rpc:         { addr: "0.0.0.0:5001" }
+  grpc:        { addr: "0.0.0.0:5002" }
+  api:         { addr: "0.0.0.0:5003" }
+  eth_rpc:     { addr: "0.0.0.0:5005" }
+  eth_ws:      { addr: "0.0.0.0:5006" }
+  chainstream: { addr: "0.0.0.0:5007" }
+  inj_ws:      { addr: "0.0.0.0:5008" }
+  admin:       { addr: "127.0.0.1:9091" }
+
+log:
+  level: info
+  format: json
+
+policies:
+  failover:
+    max_attempts: 3
+    per_attempt_timeout: 5s
+  hedging:
+    enabled: true
+    methods: [eth_call, eth_estimateGas, abci_query]
+  circuit:
+    error_threshold: 0.5
+    min_requests: 20
+    open_duration: 30s
+  cache:
+    enabled: true
+    confirmation_depth: 100
+    l1_size_mb: 2048
+  health:
+    probe_interval: 5s
+    max_lag_blocks: 50
+  subscriptions:
+    multicast: true
+    slow_consumer: drop
+
+backends:
+  # Shard 1: blocks 1 through 50_000_000 (a "subnode"-style archive shard)
+  - name: shard-1
+    coverage: { kind: bounded, lower: 1, upper: 50000000 }
+    weight: 100
+    tags: [shard, deep]
+    endpoints:
+      rpc:  http://shard-1.internal:26657
+      grpc: shard-1.internal:9900
+      api:  http://shard-1.internal:1317
+
+  # Shard 2: blocks 50_000_001 through head (open-ended)
+  - name: shard-2
+    coverage: { kind: open, lower: 50000001 }
+    weight: 100
+    tags: [shard]
+    endpoints:
+      rpc:  http://shard-2.internal:26657
+      grpc: shard-2.internal:9900
+      api:  http://shard-2.internal:1317
+
+  # Hot tier: pruned node holding the last 100k blocks. This handles
+  # the ~99% of latest-block queries cheaply, so the shards aren't
+  # burned for the warm working set.
+  - name: hot-tip
+    coverage: { kind: pruned, keep: 100000 }
+    weight: 100
+    tags: [hot, tip]
+    endpoints:
+      rpc:         ${HOT_RPC_URL}
+      grpc:        ${HOT_GRPC_URL}
+      api:         ${HOT_API_URL}
+      eth_rpc:     ${HOT_ETH_RPC_URL}
+      eth_ws:      ${HOT_ETH_WS_URL}
+
+  # Full archive — fallback when shards or hot-tip can't serve. Tagged
+  # so you can drain it independently for maintenance.
+  - name: archive
+    coverage: { kind: archive }
+    weight: 50              # lower weight: prefer narrower backends
+    tags: [archive, fallback]
+    endpoints:
+      rpc:         ${ARCHIVE_RPC_URL}
+      grpc:        ${ARCHIVE_GRPC_URL}
+      api:         ${ARCHIVE_API_URL}
+      eth_rpc:     ${ARCHIVE_ETH_RPC_URL}
+      eth_ws:      ${ARCHIVE_ETH_WS_URL}
+      chainstream: ${ARCHIVE_CHAINSTREAM_URL}
