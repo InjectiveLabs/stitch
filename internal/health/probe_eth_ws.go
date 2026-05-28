@@ -135,6 +135,8 @@ func (p *EthWSProber) trackOne(ctx context.Context, name, ep string) {
 		if ctx.Err() != nil {
 			return
 		}
+		// Stream dropped — mark unhealthy so operators see it in dashboards.
+		metrics.BackendHealth.WithLabelValues(name, string(types.ProtoEthWS)).Set(0)
 		log.L().Warn("eth_ws head stream dropped", "backend", name, "err", errString(err))
 		if time.Since(start) >= p.healthyStreamThreshold {
 			// Stream lasted long enough that we treat it as healthy —
@@ -186,6 +188,7 @@ func errString(err error) string {
 
 const (
 	wsReadDeadline     = 15 * time.Second
+	wsWriteDeadline    = 5 * time.Second
 	wsHandshakeTimeout = 5 * time.Second
 	wsSubscribeRequest = `{"jsonrpc":"2.0","id":1,"method":"eth_subscribe","params":["newHeads"]}`
 )
@@ -213,6 +216,7 @@ func (p *EthWSProber) subscribeAndStream(ctx context.Context, name, ep string) e
 	}()
 
 	_ = conn.SetReadDeadline(time.Now().Add(wsReadDeadline))
+	_ = conn.SetWriteDeadline(time.Now().Add(wsWriteDeadline))
 	if err := conn.WriteMessage(websocket.TextMessage, []byte(wsSubscribeRequest)); err != nil {
 		return fmt.Errorf("write subscribe: %w", err)
 	}
