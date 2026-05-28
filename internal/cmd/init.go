@@ -36,7 +36,7 @@ policies:
     confirmation_depth: 100
   health:
     probe_interval: 5s
-    max_lag_blocks: 50
+    max_lag_blocks: 50          # gap allowance vs. observed head (see README)
   subscriptions:
     multicast: true
     slow_consumer: drop
