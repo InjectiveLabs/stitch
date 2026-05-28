@@ -53,6 +53,12 @@ func (p *RPCProber) Run(ctx context.Context) {
 
 func (p *RPCProber) tick(ctx context.Context) {
 	for _, b := range p.registry.Snapshot() {
+		// Bounded coverage is static — BoundedVerifier handles those once at
+		// startup; periodic /status polls would only update fields the
+		// selector doesn't consult for bounded backends.
+		if b.Coverage.Kind == backend.CovBounded {
+			continue
+		}
 		ep := b.Endpoint(types.ProtoRPC)
 		if ep == "" {
 			continue

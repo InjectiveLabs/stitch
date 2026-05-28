@@ -42,6 +42,10 @@ func (p *GRPCProber) Run(ctx context.Context) {
 
 func (p *GRPCProber) tick(ctx context.Context) {
 	for _, b := range p.registry.Snapshot() {
+		// Bounded coverage is static — BoundedVerifier handles those once.
+		if b.Coverage.Kind == backend.CovBounded {
+			continue
+		}
 		ep := b.Endpoint(types.ProtoGRPC)
 		if ep == "" {
 			continue

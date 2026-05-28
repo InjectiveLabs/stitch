@@ -71,6 +71,12 @@ func (p *EthWSProber) Run(ctx context.Context) {
 	reconcile := func() {
 		seen := map[string]bool{}
 		for _, b := range p.registry.Snapshot() {
+			// Bounded coverage is static — newHeads provides no routing
+			// signal for backends that don't follow head. BoundedVerifier
+			// handles their health once at startup.
+			if b.Coverage.Kind == backend.CovBounded {
+				continue
+			}
 			ep := b.Endpoint(types.ProtoEthWS)
 			if ep == "" {
 				continue
