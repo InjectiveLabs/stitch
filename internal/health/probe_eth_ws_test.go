@@ -178,3 +178,79 @@ func TestEthWSProberSnapshotOnHeader(t *testing.T) {
 		t.Fatal("subscribeAndStream did not exit after ctx cancel")
 	}
 }
+
+// killOldestConn closes the first WS connection the mock accepted —
+// simulating the upstream dropping the stream.
+func (m *wsBackendMock) killOldestConn(t *testing.T) {
+	t.Helper()
+	m.mu.Lock()
+	if len(m.conns) == 0 {
+		m.mu.Unlock()
+		t.Fatal("no connections to kill")
+	}
+	c := m.conns[0]
+	m.mu.Unlock()
+	_ = c.Close()
+}
+
+func TestEthWSProberReconnectAfterDrop(t *testing.T) {
+	mock := newWSBackendMock(t)
+
+	bs := []*backend.Backend{{
+		Name:      "tip",
+		Endpoints: map[types.Protocol]string{types.ProtoEthWS: mock.URL()},
+	}}
+	reg := backend.NewRegistry(bs)
+	h := NewRegistry()
+	p := NewEthWSProber(reg, h)
+	// Tighten backoff so the test runs fast.
+	p.baseBackoff = 50 * time.Millisecond
+	p.maxBackoff = 200 * time.Millisecond
+	p.healthyStreamThreshold = 10 * time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go p.trackOne(ctx, "tip", mock.URL())
+
+	waitForAcks := func(n int64) {
+		deadline := time.After(3 * time.Second)
+		for mock.subAcked.Load() < n {
+			select {
+			case <-deadline:
+				t.Fatalf("expected %d acks, got %d", n, mock.subAcked.Load())
+			case <-time.After(10 * time.Millisecond):
+			}
+		}
+	}
+
+	// First subscribe + first header.
+	waitForAcks(1)
+	mock.emit(t, 100)
+
+	deadline := time.After(2 * time.Second)
+	for h.MaxHead() != 100 {
+		select {
+		case <-deadline:
+			t.Fatalf("MaxHead = %d, want 100", h.MaxHead())
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+
+	// Drop the first connection; expect a reconnect.
+	mock.killOldestConn(t)
+	waitForAcks(2)
+
+	// Emit a higher header on the new connection; MaxHead must advance.
+	mock.emit(t, 150)
+	deadline = time.After(2 * time.Second)
+	for h.MaxHead() != 150 {
+		select {
+		case <-deadline:
+			t.Fatalf("MaxHead = %d, want 150", h.MaxHead())
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+
+	cancel()
+}

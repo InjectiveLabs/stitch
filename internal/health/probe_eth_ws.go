@@ -5,13 +5,16 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math/rand"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
 
 	"github.com/decentrio/stitch/internal/backend"
+	"github.com/decentrio/stitch/internal/log"
 	"github.com/decentrio/stitch/internal/types"
 )
 
@@ -30,21 +33,105 @@ type EthWSProber struct {
 	health   *Registry
 	dialer   *websocket.Dialer
 	refresh  time.Duration // backend-set reconciliation tick
+
+	// reconnect backoff knobs — exposed for tests to tighten the loop.
+	baseBackoff            time.Duration
+	maxBackoff             time.Duration
+	healthyStreamThreshold time.Duration
+
+	rand *rand.Rand
+	mu   sync.Mutex // guards rand (rand.Rand is not goroutine-safe)
 }
 
 // NewEthWSProber returns a prober wired against the given registries.
 func NewEthWSProber(reg *backend.Registry, h *Registry) *EthWSProber {
 	return &EthWSProber{
-		registry: reg,
-		health:   h,
-		dialer:   &websocket.Dialer{HandshakeTimeout: wsHandshakeTimeout},
-		refresh:  30 * time.Second,
+		registry:               reg,
+		health:                 h,
+		dialer:                 &websocket.Dialer{HandshakeTimeout: wsHandshakeTimeout},
+		refresh:                30 * time.Second,
+		baseBackoff:            1 * time.Second,
+		maxBackoff:             30 * time.Second,
+		healthyStreamThreshold: 5 * time.Second,
+		rand:                   rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
 }
 
 // Run blocks until ctx is cancelled. Real implementation lands in Task 5.
 func (p *EthWSProber) Run(ctx context.Context) {
 	<-ctx.Done()
+}
+
+// trackOne maintains a single backend's head subscription, reconnecting
+// with exponential backoff on every dropped stream until ctx is cancelled.
+// When a stream stays up longer than healthyStreamThreshold, the backoff
+// resets — a flaky link that periodically reconnects gets baseBackoff
+// per retry, not a runaway doubling.
+func (p *EthWSProber) trackOne(ctx context.Context, name, ep string) {
+	delay := time.Duration(0) // first attempt: immediate
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		if delay > 0 {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(delay):
+			}
+		}
+		start := time.Now()
+		err := p.subscribeAndStream(ctx, name, ep)
+		if ctx.Err() != nil {
+			return
+		}
+		log.L().Warn("eth_ws head stream dropped", "backend", name, "err", errString(err))
+		if time.Since(start) >= p.healthyStreamThreshold {
+			// Stream lasted long enough that we treat it as healthy —
+			// reset to baseBackoff for the next attempt.
+			delay = 0
+		}
+		delay = p.nextBackoff(delay)
+	}
+}
+
+// nextBackoff doubles the previous delay (or starts at baseBackoff), then
+// applies +/-20% jitter and clamps to [1ms, maxBackoff]. The 1ms floor
+// prevents a hot spin if baseBackoff is somehow zero.
+func (p *EthWSProber) nextBackoff(prev time.Duration) time.Duration {
+	next := prev * 2
+	if next < p.baseBackoff {
+		next = p.baseBackoff
+	}
+	if next > p.maxBackoff {
+		next = p.maxBackoff
+	}
+	// +/- 20% jitter around `next`.
+	span := int64(next) / 5
+	var result time.Duration
+	if span <= 0 {
+		result = next
+	} else {
+		p.mu.Lock()
+		j := p.rand.Int63n(2*span) - span
+		p.mu.Unlock()
+		result = next + time.Duration(j)
+	}
+	// Final clamp so jitter can't exceed maxBackoff or drop below 1ms.
+	if p.maxBackoff > 0 && result > p.maxBackoff {
+		result = p.maxBackoff
+	}
+	if result < time.Millisecond {
+		result = time.Millisecond
+	}
+	return result
+}
+
+func errString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 const (
