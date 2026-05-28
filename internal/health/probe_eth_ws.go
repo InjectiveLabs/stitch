@@ -1,13 +1,18 @@
 package health
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/gorilla/websocket"
 
 	"github.com/decentrio/stitch/internal/backend"
+	"github.com/decentrio/stitch/internal/types"
 )
 
 // EthWSProber maintains a long-lived eth_subscribe newHeads stream per
@@ -32,7 +37,7 @@ func NewEthWSProber(reg *backend.Registry, h *Registry) *EthWSProber {
 	return &EthWSProber{
 		registry: reg,
 		health:   h,
-		dialer:   &websocket.Dialer{HandshakeTimeout: 5 * time.Second},
+		dialer:   &websocket.Dialer{HandshakeTimeout: wsHandshakeTimeout},
 		refresh:  30 * time.Second,
 	}
 }
@@ -40,6 +45,120 @@ func NewEthWSProber(reg *backend.Registry, h *Registry) *EthWSProber {
 // Run blocks until ctx is cancelled. Real implementation lands in Task 5.
 func (p *EthWSProber) Run(ctx context.Context) {
 	<-ctx.Done()
+}
+
+const (
+	wsReadDeadline     = 15 * time.Second
+	wsHandshakeTimeout = 5 * time.Second
+	wsSubscribeRequest = `{"jsonrpc":"2.0","id":1,"method":"eth_subscribe","params":["newHeads"]}`
+)
+
+// subscribeAndStream dials ep, sends eth_subscribe newHeads, then loops
+// reading frames and pushing each header into the health registry. Returns
+// on any I/O error or when ctx is cancelled.
+func (p *EthWSProber) subscribeAndStream(ctx context.Context, name, ep string) error {
+	wsURL := normalizeWS(ep)
+	conn, _, err := p.dialer.DialContext(ctx, wsURL, nil)
+	if err != nil {
+		return fmt.Errorf("dial %s: %w", wsURL, err)
+	}
+	defer conn.Close()
+
+	// Cancel reads when ctx is done by closing the conn.
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = conn.Close()
+		case <-stop:
+		}
+	}()
+
+	_ = conn.SetReadDeadline(time.Now().Add(wsReadDeadline))
+	if err := conn.WriteMessage(websocket.TextMessage, []byte(wsSubscribeRequest)); err != nil {
+		return fmt.Errorf("write subscribe: %w", err)
+	}
+
+	// Read subscribe ack. A JSON-RPC error response here aborts the loop;
+	// outer caller reconnects with backoff.
+	_, ack, err := conn.ReadMessage()
+	if err != nil {
+		return fmt.Errorf("read ack: %w", err)
+	}
+	var ackResp struct {
+		Result json.RawMessage `json:"result"`
+		Error  json.RawMessage `json:"error"`
+	}
+	if err := json.Unmarshal(ack, &ackResp); err != nil {
+		return fmt.Errorf("decode ack: %w", err)
+	}
+	if ackResp.Error != nil && string(ackResp.Error) != "null" {
+		return fmt.Errorf("subscribe error: %s", ackResp.Error)
+	}
+
+	for {
+		_ = conn.SetReadDeadline(time.Now().Add(wsReadDeadline))
+		_, frame, err := conn.ReadMessage()
+		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return fmt.Errorf("read frame: %w", err)
+		}
+		height, ok := parseNewHeadsNotification(frame)
+		if !ok || height <= 0 {
+			continue
+		}
+		snap := Snapshot{
+			Backend:      name,
+			Protocol:     types.ProtoEthWS,
+			LatestHeight: height,
+			Healthy:      true,
+			UpdatedAt:    time.Now(),
+		}
+		p.health.Update(snap)
+		emitHealth(snap)
+	}
+}
+
+// parseNewHeadsNotification extracts the block number from an
+// eth_subscription newHeads notification frame. Returns (height, true) on
+// success; (0, false) if the frame is not a matching notification.
+//
+// Inlined to avoid an import cycle: subscription -> selector -> health.
+func parseNewHeadsNotification(raw []byte) (int64, bool) {
+	var env struct {
+		Method string `json:"method"`
+		Params struct {
+			Subscription string `json:"subscription"`
+			Result       struct {
+				Number string `json:"number"`
+			} `json:"result"`
+		} `json:"params"`
+	}
+	if err := json.Unmarshal(bytes.TrimSpace(raw), &env); err != nil {
+		return 0, false
+	}
+	if env.Method != "eth_subscription" || env.Params.Subscription == "" {
+		return 0, false
+	}
+	s := strings.TrimSpace(env.Params.Result.Number)
+	if s == "" {
+		return 0, false
+	}
+	if strings.HasPrefix(s, "0x") || strings.HasPrefix(s, "0X") {
+		h, err := strconv.ParseInt(s[2:], 16, 64)
+		if err != nil {
+			return 0, false
+		}
+		return h, true
+	}
+	h, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return h, true
 }
 
 // normalizeWS maps http(s):// to ws(s):// for endpoints configured as
