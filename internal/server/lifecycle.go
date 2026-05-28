@@ -9,6 +9,7 @@ import (
 	"errors"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -76,6 +77,12 @@ func (m *Manager) Run(parent context.Context) error {
 		for {
 			select {
 			case <-gctx.Done():
+				// A peer server returned an error (errgroup cancels gctx).
+				// Drain the rest so they don't hang forever — without this,
+				// e.g. an admin port conflict would leave every other listener
+				// alive and unkillable by SIGTERM.
+				log.L().Info("peer server failed; draining remaining servers")
+				m.drain()
 				return nil
 			case sig := <-sigCh:
 				switch sig {
@@ -105,16 +112,64 @@ func (m *Manager) Run(parent context.Context) error {
 	return nil
 }
 
+// drain fans out Shutdown to every managed server in parallel and returns
+// as soon as the last one completes — or as soon as shutdownGrace elapses,
+// whichever comes first. Per-server timings are logged so operators can
+// identify which server is slow to drain. Servers still running when the
+// grace expires are explicitly flagged.
 func (m *Manager) drain() {
 	ctx, cancel := context.WithTimeout(context.Background(), m.shutdownGrace)
 	defer cancel()
+
+	var wg sync.WaitGroup
+	finished := make(map[string]chan struct{}, len(m.servers))
+	for _, s := range m.servers {
+		finished[s.Name()] = make(chan struct{})
+	}
+
 	for _, s := range m.servers {
 		s := s
+		wg.Add(1)
 		go func() {
+			defer wg.Done()
+			defer close(finished[s.Name()])
+			start := time.Now()
 			if err := s.Shutdown(ctx); err != nil {
-				log.L().Error("shutdown error", "server", s.Name(), "err", err.Error())
+				log.L().Error("shutdown error",
+					"server", s.Name(),
+					"err", err.Error(),
+					"elapsed", time.Since(start).String(),
+				)
+				return
 			}
+			log.L().Info("server drained",
+				"server", s.Name(),
+				"elapsed", time.Since(start).String(),
+			)
 		}()
 	}
-	<-ctx.Done()
+
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+
+	select {
+	case <-done:
+		log.L().Info("graceful shutdown complete")
+	case <-ctx.Done():
+		// Log every server that did NOT finish in time so the operator can
+		// see exactly which one is holding things up. Useful when investigating
+		// hangs (e.g. an HTTP server with sticky keepalive connections).
+		var slow []string
+		for name, ch := range finished {
+			select {
+			case <-ch:
+			default:
+				slow = append(slow, name)
+			}
+		}
+		log.L().Warn("graceful shutdown timed out",
+			"grace", m.shutdownGrace.String(),
+			"servers_still_draining", slow,
+		)
+	}
 }
