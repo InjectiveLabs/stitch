@@ -59,8 +59,12 @@ func NewRangeSelector(reg *backend.Registry, h *health.Registry, c *circuit.Mana
 func (s *RangeSelector) Candidates(k types.RouteKey) []*backend.Backend {
 	all := s.registry.Snapshot()
 	head := s.health.MaxHead()
-	if head == 0 {
-		head = k.HeightOrZero()
+	// Use the queried height as a floor: if the client just asked about
+	// block N, treat the effective head as at least N. Covers the race
+	// between probe-sourced MaxHead and the actual chain tip without
+	// changing eligibility for queries within the probed window.
+	if h := k.HeightOrZero(); h > head {
+		head = h
 	}
 
 	type scored struct {

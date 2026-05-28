@@ -239,6 +239,11 @@ policies:
   health:
     probe_interval: 5s                 # how often to probe each backend
     max_lag_blocks: 50                 # trip out backends lagging head by N
+                                       # NOTE: stitch tracks head over eth_subscribe newHeads
+                                       # where available; backends without an eth_ws endpoint
+                                       # are sourced from a slower /status poll and will
+                                       # appear ~probe_interval × block_rate blocks behind.
+                                       # Set this comfortably above that gap, or omit it.
   subscriptions:
     multicast: true                    # N clients / 1 upstream
     slow_consumer: drop                # drop | disconnect | backpressure

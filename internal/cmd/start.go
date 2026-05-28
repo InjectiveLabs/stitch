@@ -90,6 +90,7 @@ func startCmd() *cobra.Command {
 			go health.NewRPCProber(reg, h, cfg.Policies.Health.ProbeInterval).Run(ctx)
 			go health.NewRESTProber(reg, h, cfg.Policies.Health.ProbeInterval).Run(ctx)
 			go health.NewGRPCProber(reg, grpcPool, h, cfg.Policies.Health.ProbeInterval).Run(ctx)
+			go health.NewEthWSProber(reg, h).Run(ctx)
 			go grpcPool.RunEvictor(ctx, time.Minute)
 
 			mgr := server.New(shutdownGrace)
