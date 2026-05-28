@@ -142,3 +142,51 @@ func TestRangeSelectorEmptyWhenNoEndpoint(t *testing.T) {
 		t.Fatalf("expected 0, got %d (no backend has eth_rpc)", len(cands))
 	}
 }
+
+// TestRangeSelectorHeightFloor exercises the selector floor: when the
+// queried height exceeds MaxHead (stale probe / brief WS-disconnect window),
+// any backend whose coverage upper bound rides head (pruned / open /
+// archive) must still be treated as eligible for that height. Today the
+// bug is that Eligible(h, head) requires h <= head, and head = MaxHead.
+func TestRangeSelectorHeightFloor(t *testing.T) {
+	cases := []struct {
+		name     string
+		coverage backend.Coverage
+	}{
+		{"pruned", backend.Coverage{Kind: backend.CovPruned, Keep: 1000}},
+		{"open", backend.Coverage{Kind: backend.CovOpen, Lower: 1}},
+		{"archive", backend.Coverage{Kind: backend.CovArchive}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			bs := []*backend.Backend{{
+				Name:      tc.name,
+				Coverage:  tc.coverage,
+				Weight:    100,
+				Endpoints: map[types.Protocol]string{types.ProtoEthRPC: "http://" + tc.name + ":8545"},
+			}}
+			reg := backend.NewRegistry(bs)
+			h := health.NewRegistry()
+			// MaxHead lags real chain by 50 blocks — the race window.
+			h.Update(health.Snapshot{
+				Backend:      tc.name,
+				Protocol:     types.ProtoRPC,
+				Healthy:      true,
+				LatestHeight: 100_000,
+			})
+			cm := circuit.NewManager(circuit.Policy{ErrorThreshold: 0.5, MinRequests: 4, OpenDuration: 100 * time.Millisecond})
+			s := NewRangeSelector(reg, h, cm, 0)
+
+			queried := int64(100_050) // 50 blocks past MaxHead
+			cands := s.Candidates(types.RouteKey{
+				Protocol: types.ProtoEthRPC,
+				Method:   "eth_getBalance",
+				Class:    types.ClassByHeight,
+				Height:   &queried,
+			})
+			if len(cands) != 1 || cands[0].Name != tc.name {
+				t.Fatalf("expected %q candidate, got %v", tc.name, cands)
+			}
+		})
+	}
+}
