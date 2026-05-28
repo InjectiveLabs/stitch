@@ -15,6 +15,7 @@ import (
 
 	"github.com/decentrio/stitch/internal/backend"
 	"github.com/decentrio/stitch/internal/log"
+	"github.com/decentrio/stitch/internal/metrics"
 	"github.com/decentrio/stitch/internal/types"
 )
 
@@ -254,7 +255,12 @@ func (p *EthWSProber) subscribeAndStream(ctx context.Context, name, ep string) e
 			UpdatedAt:    time.Now(),
 		}
 		p.health.Update(snap)
-		emitHealth(snap)
+		// Don't use emitHealth here: it would write 0 into BackendLagBlocks
+		// (which is keyed only on backend name), clobbering the RPCProber's
+		// computed lag. WS provides freshness; lag stays an RPCProber concern.
+		// Still publish the per-protocol BackendHealth gauge so operators can
+		// see whether the eth_ws stream is alive.
+		metrics.BackendHealth.WithLabelValues(snap.Backend, string(snap.Protocol)).Set(1)
 	}
 }
 
