@@ -59,6 +59,9 @@ func applyDefaults(c *Config) {
 	if c.Policies.Failover.PerAttemptTimeout == 0 {
 		c.Policies.Failover.PerAttemptTimeout = 5 * time.Second
 	}
+	if c.Policies.Hedging.HedgeAfter == 0 {
+		c.Policies.Hedging.HedgeAfter = 200 * time.Millisecond
+	}
 	if c.Policies.Circuit.ErrorThreshold == 0 {
 		c.Policies.Circuit.ErrorThreshold = 0.5
 	}
@@ -70,6 +73,15 @@ func applyDefaults(c *Config) {
 	}
 	if c.Policies.Cache.ConfirmationDepth == 0 {
 		c.Policies.Cache.ConfirmationDepth = 100
+	}
+	if c.Policies.Cache.TTL == 0 {
+		c.Policies.Cache.TTL = 5 * time.Minute
+	}
+	if c.Policies.Cache.HashIndexEntries == 0 {
+		c.Policies.Cache.HashIndexEntries = 100_000
+	}
+	if c.Policies.Cache.ResponseEntries == 0 {
+		c.Policies.Cache.ResponseEntries = 50_000
 	}
 	if c.Policies.Cache.L1SizeMB == 0 {
 		c.Policies.Cache.L1SizeMB = 1024

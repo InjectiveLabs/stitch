@@ -110,6 +110,9 @@ func validatePolicies(p PoliciesConfig) error {
 	if p.Failover.PerAttemptTimeout <= 0 {
 		return errors.New("policies.failover.per_attempt_timeout must be > 0")
 	}
+	if p.Hedging.Enabled && p.Hedging.HedgeAfter <= 0 {
+		return errors.New("policies.hedging.hedge_after must be > 0 when hedging is enabled")
+	}
 	if p.Circuit.ErrorThreshold <= 0 || p.Circuit.ErrorThreshold > 1 {
 		return errors.New("policies.circuit.error_threshold must be in (0, 1]")
 	}
@@ -129,6 +132,17 @@ func validatePolicies(p PoliciesConfig) error {
 	case "", "drop", "disconnect", "backpressure":
 	default:
 		return fmt.Errorf("policies.subscriptions.slow_consumer=%q (allowed: drop|disconnect|backpressure)", p.Subscriptions.SlowConsumer)
+	}
+	if p.Cache.Enabled {
+		if p.Cache.TTL <= 0 {
+			return errors.New("policies.cache.ttl must be > 0 when cache is enabled")
+		}
+		if p.Cache.HashIndexEntries <= 0 {
+			return errors.New("policies.cache.hash_index_entries must be > 0 when cache is enabled")
+		}
+		if p.Cache.ResponseEntries <= 0 {
+			return errors.New("policies.cache.response_entries must be > 0 when cache is enabled")
+		}
 	}
 	switch p.Cache.L2Kind {
 	case "", "none", "redis":

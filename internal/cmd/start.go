@@ -20,8 +20,8 @@ import (
 	"github.com/decentrio/stitch/internal/pool"
 	"github.com/decentrio/stitch/internal/selector"
 	"github.com/decentrio/stitch/internal/server"
-	"github.com/decentrio/stitch/internal/server/cmt_rpc"
 	"github.com/decentrio/stitch/internal/server/chainstream"
+	"github.com/decentrio/stitch/internal/server/cmt_rpc"
 	"github.com/decentrio/stitch/internal/server/cosmos_grpc"
 	"github.com/decentrio/stitch/internal/server/cosmos_rest"
 	"github.com/decentrio/stitch/internal/server/eth_rpc"
@@ -63,16 +63,16 @@ func startCmd() *cobra.Command {
 			selCore := selector.NewRangeSelector(reg, h, cmgr, cfg.Policies.Health.MaxLagBlocks)
 			httpPool := pool.NewHTTPPool()
 			grpcPool := pool.NewGRPCPool(5 * time.Minute)
-			hashIdx := cache.New(100_000)
+			hashIdx := cache.New(cfg.Policies.Cache.HashIndexEntries)
 			respCache := cache.NewResponseCache(cache.ResponseCacheOpts{
-				Capacity: 50_000,
+				Capacity: cfg.Policies.Cache.ResponseEntries,
 				MaxBytes: int64(cfg.Policies.Cache.L1SizeMB) * 1024 * 1024,
 			})
 			headFn := func() int64 { return h.MaxHead() }
 			fwd := forwarder.NewHTTP(selCore, httpPool, cmgr, forwarder.Policy{
 				MaxAttempts:       cfg.Policies.Failover.MaxAttempts,
 				PerAttemptTimeout: cfg.Policies.Failover.PerAttemptTimeout,
-				HedgeAfter:        200 * time.Millisecond,
+				HedgeAfter:        cfg.Policies.Hedging.HedgeAfter,
 			})
 			grpcDirector := cosmos_grpc.NewDirector(selCore, cmgr, grpcPool)
 
@@ -109,7 +109,7 @@ func startCmd() *cobra.Command {
 				cmtSrv := cmt_rpc.New(cfg.Listen.RPC.Addr, fwd)
 				cmtSrv.SetHashCache(hashIdx)
 				if cfg.Policies.Cache.Enabled {
-					cmtSrv.SetResponseCache(respCache, headFn, cfg.Policies.Cache.ConfirmationDepth)
+					cmtSrv.SetResponseCache(respCache, headFn, cfg.Policies.Cache.ConfirmationDepth, cfg.Policies.Cache.TTL)
 				}
 				mgr.Add(cmtSrv)
 			}
@@ -127,8 +127,9 @@ func startCmd() *cobra.Command {
 				ethSrv := eth_rpc.New(cfg.Listen.EthRPC.Addr, fwd)
 				ethSrv.SetHashCache(hashIdx)
 				if cfg.Policies.Cache.Enabled {
-					ethSrv.SetResponseCache(respCache, headFn, cfg.Policies.Cache.ConfirmationDepth)
+					ethSrv.SetResponseCache(respCache, headFn, cfg.Policies.Cache.ConfirmationDepth, cfg.Policies.Cache.TTL)
 				}
+				ethSrv.SetHedging(cfg.Policies.Hedging.Enabled, cfg.Policies.Hedging.Methods)
 				ethSrv.SetDangerousAllowlist(eth_rpc.NewDangerousAllowlist(cfg.Policies.DangerousMethods.Allow))
 				mgr.Add(ethSrv)
 			}
@@ -151,11 +152,26 @@ func startCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				holder.Swap(next)
-				if newBackends, err := backend.FromConfig(next.Backends); err == nil {
-					reg.Set(newBackends)
-				} else {
+				newBackends, err := backend.FromConfig(next.Backends)
+				if err != nil {
 					return err
+				}
+				prev := holder.Swap(next)
+				reg.Set(newBackends)
+				// Drop health snapshots (and their metrics) for backends the
+				// new config no longer declares.
+				active := make(map[string]struct{}, len(newBackends))
+				for _, b := range newBackends {
+					active[b.Name] = struct{}{}
+				}
+				h.Prune(func(name string) bool {
+					_, ok := active[name]
+					return ok
+				})
+				// Only backends and log apply live; tell the operator what
+				// they changed that won't take effect until restart.
+				if ignored := config.DiffNonReloadable(prev, next); len(ignored) > 0 {
+					log.L().Warn("reload: changes ignored until restart", "sections", ignored)
 				}
 				return log.Init(next.Log.Level, next.Log.Format, nil)
 			}

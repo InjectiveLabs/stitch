@@ -73,11 +73,35 @@ func TestHashIndexOverwrite(t *testing.T) {
 
 func TestHashIndexRejectsZero(t *testing.T) {
 	h := New(10)
-	h.Set("", 42)        // empty hash
-	h.Set("0xabc", 0)    // zero height
-	h.Set("0xdef", -1)   // negative height
+	h.Set("", 42)      // empty hash
+	h.Set("0xabc", 0)  // zero height
+	h.Set("0xdef", -1) // negative height
 	if h.Size() != 0 {
 		t.Errorf("size: %d (expected 0; invalid entries should be rejected)", h.Size())
+	}
+}
+
+func TestHashIndexPurge(t *testing.T) {
+	h := New(10)
+	for i := 0; i < 5; i++ {
+		h.Set("h"+strconv.Itoa(i), int64(i+1))
+	}
+	if n := h.Purge(); n != 5 {
+		t.Errorf("purge returned %d; want 5", n)
+	}
+	if h.Size() != 0 {
+		t.Errorf("size after purge: %d", h.Size())
+	}
+	if _, ok := h.Get("h0"); ok {
+		t.Error("purged key should miss")
+	}
+	if n := h.Purge(); n != 0 {
+		t.Errorf("second purge returned %d; want 0", n)
+	}
+	// Cache still works after a purge.
+	h.Set("again", 9)
+	if got, ok := h.Get("again"); !ok || got != 9 {
+		t.Errorf("set-after-purge: got %d %v", got, ok)
 	}
 }
 

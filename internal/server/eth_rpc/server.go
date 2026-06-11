@@ -26,8 +26,13 @@ type Server struct {
 	respCache *cache.ResponseCache
 	head      cache.HeadProvider
 	confDepth int64
+	cacheTTL  time.Duration
 	dangerous *DangerousAllowlist
-	srv       *http.Server
+	// hedgeEnabled/hedgeMethods gate hedged dispatch on top of the
+	// manifest's per-method hedge flag; see SetHedging.
+	hedgeEnabled bool
+	hedgeMethods map[string]struct{}
+	srv          *http.Server
 }
 
 func New(addr string, fwd *forwarder.HTTP) *Server {
@@ -50,12 +55,46 @@ func New(addr string, fwd *forwarder.HTTP) *Server {
 // height-keyed routes, and (b) populates it from successful responses.
 func (s *Server) SetHashCache(c *cache.HashIndex) { s.cache = c }
 
-// SetResponseCache wires a shared response-body cache and the chain-head
-// accessor used to gate cacheability by confirmation depth.
-func (s *Server) SetResponseCache(c *cache.ResponseCache, head cache.HeadProvider, confirmationDepth int64) {
+// SetResponseCache wires a shared response-body cache, the chain-head
+// accessor used to gate cacheability by confirmation depth, and the TTL
+// applied to entries this server stores (ttl ≤ 0 stores without expiry).
+func (s *Server) SetResponseCache(c *cache.ResponseCache, head cache.HeadProvider, confirmationDepth int64, ttl time.Duration) {
 	s.respCache = c
 	s.head = head
 	s.confDepth = confirmationDepth
+	s.cacheTTL = ttl
+}
+
+// SetHedging gates hedged dispatch. Hedging stays off (the default) until
+// enabled here; an empty methods list lets every manifest-flagged method
+// hedge, a non-empty list restricts hedging to methods present in BOTH the
+// manifest flag and the list. Call before the listener starts serving.
+func (s *Server) SetHedging(enabled bool, methods []string) {
+	s.hedgeEnabled = enabled
+	s.hedgeMethods = nil
+	if len(methods) > 0 {
+		s.hedgeMethods = make(map[string]struct{}, len(methods))
+		for _, m := range methods {
+			s.hedgeMethods[m] = struct{}{}
+		}
+	}
+}
+
+// applyHedgePolicy clears the decoded hedge flag unless operator config
+// allows this method to hedge.
+func (s *Server) applyHedgePolicy(d *decoded) {
+	if !d.key.Hedge {
+		return
+	}
+	if !s.hedgeEnabled {
+		d.key.Hedge = false
+		return
+	}
+	if s.hedgeMethods != nil {
+		if _, ok := s.hedgeMethods[d.method]; !ok {
+			d.key.Hedge = false
+		}
+	}
 }
 
 // SetDangerousAllowlist installs the operator-provided opt-in list of
@@ -133,6 +172,9 @@ func (s *Server) handleSingle(w http.ResponseWriter, r *http.Request, body []byt
 	}
 	ctx := log.WithMethod(r.Context(), d.method)
 
+	// Operator config gates hedging on top of the manifest flag.
+	s.applyHedgePolicy(&d)
+
 	// Hash-memo fast path: if the cache knows the height for this hash,
 	// rewrite to a height-keyed route. The selector picks the cheapest
 	// backend whose coverage includes the height, instead of having to
@@ -177,7 +219,7 @@ func (s *Server) handleSingle(w http.ResponseWriter, r *http.Request, body []byt
 			dispatch(cap, r.WithContext(ctx), d.key)
 			cap.flushTo(w)
 			if cap.status >= 200 && cap.status < 300 {
-				s.respCache.Set(cacheKey, cap.body.Bytes(), 5*time.Minute)
+				s.respCache.Set(cacheKey, cap.body.Bytes(), s.cacheTTL)
 			}
 			if s.cache != nil && shouldPopulateCache(d.method) {
 				cache.PopulateFromEthResponse(s.cache, d.method, cap.body.Bytes())
@@ -338,8 +380,8 @@ func newCapture(parent http.Header) *capture {
 	return &capture{header: parent.Clone(), status: 200}
 }
 
-func (c *capture) Header() http.Header        { return c.header }
-func (c *capture) WriteHeader(code int)       { c.status = code }
+func (c *capture) Header() http.Header  { return c.header }
+func (c *capture) WriteHeader(code int) { c.status = code }
 func (c *capture) Write(b []byte) (int, error) {
 	return c.body.Write(b)
 }

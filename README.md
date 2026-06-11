@@ -228,6 +228,11 @@ policies:
   hedging:
     enabled: true                      # parallel attempt on slow primary
     methods: [eth_call, abci_query]    # which methods qualify
+                                       # NOTE: hedging is opt-in twice — a method
+                                       # hedges only if the built-in manifest flags
+                                       # it hedge-safe AND it passes this config.
+                                       # An empty list allows every flagged method.
+    hedge_after: 200ms                 # delay before the second request (default 200ms)
   circuit:
     error_threshold: 0.5               # 50% failure rate trips
     min_requests: 20                   # over a minimum window of 20 calls
@@ -235,6 +240,9 @@ policies:
   cache:
     enabled: true
     confirmation_depth: 100            # head − N is the cacheable boundary
+    ttl: 5m                            # response-cache entry lifetime (default 5m)
+    hash_index_entries: 100000         # hash → height index capacity (default 100000)
+    response_entries: 50000            # response-cache entry capacity (default 50000)
     l1_size_mb: 1024                   # in-process LRU byte budget
   health:
     probe_interval: 5s                 # how often to probe each backend
@@ -323,7 +331,9 @@ decision against the right shard.
 For finalized reads (height ≤ head − confirmation_depth), stitch caches
 the entire response body keyed by `(protocol, method, height, params hash)`.
 The next identical call serves from local memory in ~350 ns with no
-upstream traffic.
+upstream traffic. Entries live for `policies.cache.ttl` (default 5m);
+capacities are bounded by `policies.cache.response_entries` and
+`policies.cache.hash_index_entries`.
 
 ## Operations
 
@@ -341,6 +351,7 @@ The admin listener serves these endpoints (default `127.0.0.1:9091`):
 | POST   | `/admin/backends/{name}/drain`             | remove from selector (in-flight ok)   |
 | POST   | `/admin/backends/{name}/enable`            | undrain                               |
 | GET    | `/admin/cache/stats`                       | hash-index + response-cache sizes     |
+| POST   | `/admin/cache/purge`                       | drop hash-index + response caches     |
 | POST   | `/admin/reload`                            | re-read config; same as SIGHUP        |
 
 Example session:
@@ -369,6 +380,10 @@ curl -X POST http://localhost:9091/admin/reload
 The new backend list takes effect for the next request. In-flight requests
 keep their captured snapshot. Drain state persists across reloads — operators
 don't expect "drained" to silently flip back when the file changes.
+
+Only `backends` and `log` apply live. Changes to any other section
+(`listen`, `policies.*`) are ignored until restart, and the reload logs a
+warning naming the ignored sections.
 
 ### Metrics
 

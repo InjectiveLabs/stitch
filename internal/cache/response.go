@@ -115,6 +115,18 @@ func (c *ResponseCache) Delete(key string) {
 	}
 }
 
+// Purge drops every entry, resets byte accounting, and returns how many
+// entries were removed.
+func (c *ResponseCache) Purge() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	n := c.order.Len()
+	c.entries = make(map[string]*list.Element)
+	c.order.Init()
+	c.bytesIn = 0
+	return n
+}
+
 // Size returns the current entry count.
 func (c *ResponseCache) Size() int {
 	c.mu.Lock()

@@ -26,6 +26,7 @@ type Server struct {
 	respCache *cache.ResponseCache
 	head      cache.HeadProvider
 	confDepth int64
+	cacheTTL  time.Duration
 	srv       *http.Server
 }
 
@@ -33,11 +34,13 @@ type Server struct {
 // hash-keyed methods (block_by_hash, tx, header_by_hash).
 func (s *Server) SetHashCache(c *cache.HashIndex) { s.cache = c }
 
-// SetResponseCache wires the shared response cache and head accessor.
-func (s *Server) SetResponseCache(c *cache.ResponseCache, head cache.HeadProvider, confirmationDepth int64) {
+// SetResponseCache wires the shared response cache, head accessor, and the
+// TTL applied to entries this server stores (ttl ≤ 0 stores without expiry).
+func (s *Server) SetResponseCache(c *cache.ResponseCache, head cache.HeadProvider, confirmationDepth int64, ttl time.Duration) {
 	s.respCache = c
 	s.head = head
 	s.confDepth = confirmationDepth
+	s.cacheTTL = ttl
 }
 
 func New(addr string, fwd *forwarder.HTTP) *Server {
@@ -123,7 +126,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			dispatch(cap, r, d.key)
 			cap.flushTo(w)
 			if cap.status >= 200 && cap.status < 300 {
-				s.respCache.Set(cacheKey, cap.body.Bytes(), 5*time.Minute)
+				s.respCache.Set(cacheKey, cap.body.Bytes(), s.cacheTTL)
 			}
 			if s.cache != nil && cmtPopulatable(d.key.Method) {
 				cache.PopulateFromCMTResponse(s.cache, d.key.Method, cap.body.Bytes())
