@@ -3,6 +3,8 @@ package circuit
 import (
 	"sync"
 
+	"github.com/prometheus/client_golang/prometheus"
+
 	"github.com/decentrio/stitch/internal/metrics"
 	"github.com/decentrio/stitch/internal/types"
 )
@@ -69,4 +71,24 @@ func (m *Manager) Record(backend string, p types.Protocol, success bool) {
 // State returns the current circuit state — for the admin API.
 func (m *Manager) State(backend string, p types.Protocol) State {
 	return m.get(backend, p).State()
+}
+
+// Prune drops the breakers of every backend not present in the active set
+// (e.g. removed by a hot reload) and deletes their CircuitState gauge
+// children so dashboards don't show ghost circuits. The Manager owns both
+// the breaker map and the gauge, so this cleanup lives here rather than in
+// the health registry or the reload path.
+func (m *Manager) Prune(active map[string]struct{}) {
+	removed := map[string]struct{}{}
+	m.breakers.Range(func(k, _ any) bool {
+		kk := k.(key)
+		if _, ok := active[kk.backend]; !ok {
+			m.breakers.Delete(k)
+			removed[kk.backend] = struct{}{}
+		}
+		return true
+	})
+	for name := range removed {
+		metrics.CircuitState.DeletePartialMatch(prometheus.Labels{"backend": name})
+	}
 }

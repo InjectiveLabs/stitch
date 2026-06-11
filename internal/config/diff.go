@@ -6,6 +6,12 @@ import "reflect"
 // between prev and next but are only read at startup, so a hot reload
 // silently ignores them until restart. Backends and log are excluded —
 // those genuinely reload.
+//
+// prev must be the STARTUP config, not the previously loaded one:
+// non-reloadable sections keep running with their boot values forever,
+// so only a diff against boot reports what actually diverges from the
+// running state (a last-loaded baseline would warn once per edit and
+// false-warn when a file reverts to boot values).
 func DiffNonReloadable(prev, next *Config) []string {
 	var out []string
 	add := func(name string, a, b any) {

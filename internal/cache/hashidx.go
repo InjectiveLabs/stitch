@@ -93,6 +93,7 @@ func (h *HashIndex) Purge() int {
 	n := h.order.Len()
 	h.entries = make(map[string]*list.Element)
 	h.order.Init()
+	metrics.CacheTotal.WithLabelValues("hashidx", "purge").Add(float64(n))
 	return n
 }
 

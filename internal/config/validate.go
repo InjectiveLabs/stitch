@@ -133,16 +133,18 @@ func validatePolicies(p PoliciesConfig) error {
 	default:
 		return fmt.Errorf("policies.subscriptions.slow_consumer=%q (allowed: drop|disconnect|backpressure)", p.Subscriptions.SlowConsumer)
 	}
-	if p.Cache.Enabled {
-		if p.Cache.TTL <= 0 {
-			return errors.New("policies.cache.ttl must be > 0 when cache is enabled")
-		}
-		if p.Cache.HashIndexEntries <= 0 {
-			return errors.New("policies.cache.hash_index_entries must be > 0 when cache is enabled")
-		}
-		if p.Cache.ResponseEntries <= 0 {
-			return errors.New("policies.cache.response_entries must be > 0 when cache is enabled")
-		}
+	if p.Cache.Enabled && p.Cache.TTL <= 0 {
+		return errors.New("policies.cache.ttl must be > 0 when cache is enabled")
+	}
+	// The hash index and the response cache are built unconditionally at
+	// startup (hash→height routing works even with response caching off),
+	// so their capacities must be sane regardless of cache.enabled — a
+	// value < 1 would build an unbounded structure.
+	if p.Cache.HashIndexEntries < 1 {
+		return errors.New("policies.cache.hash_index_entries must be ≥ 1")
+	}
+	if p.Cache.ResponseEntries < 1 {
+		return errors.New("policies.cache.response_entries must be ≥ 1")
 	}
 	switch p.Cache.L2Kind {
 	case "", "none", "redis":

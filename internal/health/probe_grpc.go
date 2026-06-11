@@ -61,6 +61,11 @@ func (p *GRPCProber) probe(ctx context.Context, name, addr string) {
 		UpdatedAt: time.Now(),
 	}
 	defer func() {
+		// A hot reload may have pruned this backend while the probe was in
+		// flight; publishing now would resurrect its snapshot and gauges.
+		if !p.registry.Has(name) {
+			return
+		}
 		p.health.Update(snap)
 		emitHealth(snap)
 	}()
@@ -89,5 +94,9 @@ func (p *GRPCProber) probe(ctx context.Context, name, addr string) {
 		snap.LatestHeight = rpc.LatestHeight
 		snap.Lag = rpc.Lag
 	}
-	metrics.BackendLatency.WithLabelValues(name, string(types.ProtoGRPC)).Observe(snap.LatencyP50.Seconds())
+	// Same prune guard as the deferred publish: don't re-create the latency
+	// summary child for a backend that was just removed.
+	if p.registry.Has(name) {
+		metrics.BackendLatency.WithLabelValues(name, string(types.ProtoGRPC)).Observe(snap.LatencyP50.Seconds())
+	}
 }

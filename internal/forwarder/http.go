@@ -26,7 +26,7 @@ import (
 type Policy struct {
 	MaxAttempts       int
 	PerAttemptTimeout time.Duration
-	HedgeAfter        time.Duration // 0 disables hedging
+	HedgeAfter        time.Duration // hedge delay; 0 means the 200ms default (NewHTTP clamps) — disabling hedging is the listener's job (eth_rpc SetHedging)
 }
 
 // HTTP forwards an HTTP request by iterating selector candidates, applying

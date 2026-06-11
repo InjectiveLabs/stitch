@@ -13,7 +13,7 @@ func TestPruneRemovesInactiveBackend(t *testing.T) {
 	r.Update(Snapshot{Backend: "gone", Protocol: types.ProtoRPC, Healthy: true, LatestHeight: 250})
 	r.Update(Snapshot{Backend: "gone", Protocol: types.ProtoEthRPC, Healthy: true})
 
-	r.Prune(func(name string) bool { return name == "keep" })
+	r.Prune(map[string]struct{}{"keep": {}})
 
 	if _, ok := r.Get("gone", types.ProtoRPC); ok {
 		t.Error("gone/rpc snapshot should be pruned")
@@ -39,7 +39,7 @@ func TestPruneEverythingInactive(t *testing.T) {
 	r.Update(Snapshot{Backend: "a", Protocol: types.ProtoRPC})
 	r.Update(Snapshot{Backend: "b", Protocol: types.ProtoRPC})
 
-	r.Prune(func(string) bool { return false })
+	r.Prune(map[string]struct{}{})
 
 	if got := len(r.All()); got != 0 {
 		t.Errorf("expected empty registry; got %d snapshots", got)
@@ -60,7 +60,7 @@ func TestPruneClearsBackendMetrics(t *testing.T) {
 	metrics.BackendLatency.WithLabelValues("prune-m-gone", "rpc").Observe(0.1)
 	metrics.BackendHealth.WithLabelValues("prune-m-keep", "rpc").Set(1)
 
-	r.Prune(func(name string) bool { return name == "prune-m-keep" })
+	r.Prune(map[string]struct{}{"prune-m-keep": {}})
 
 	for _, family := range []string{"stitch_backend_health", "stitch_backend_lag_blocks", "stitch_backend_latency_seconds"} {
 		if metricHasBackend(t, family, "prune-m-gone") {

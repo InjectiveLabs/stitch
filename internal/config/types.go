@@ -80,11 +80,10 @@ type FailoverPolicy struct {
 // non-empty) further restricts it to the listed method names, and
 // HedgeAfter is the delay before the second request fires.
 type HedgingPolicy struct {
-	Enabled       bool          `yaml:"enabled"`
-	Methods       []string      `yaml:"methods,omitempty"`
-	HedgeAfter    time.Duration `yaml:"hedge_after,omitempty"`
-	AfterPctOfP95 float64       `yaml:"after_pct_of_p95,omitempty"`
-	MaxHedge      time.Duration `yaml:"max_hedge,omitempty"`
+	Enabled    bool          `yaml:"enabled"`
+	Methods    []string      `yaml:"methods,omitempty"`
+	HedgeAfter time.Duration `yaml:"hedge_after,omitempty"`
+	MaxHedge   time.Duration `yaml:"max_hedge,omitempty"`
 }
 
 type CircuitPolicy struct {

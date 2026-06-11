@@ -86,3 +86,89 @@ func TestDiffNonReloadableMultipleSections(t *testing.T) {
 		t.Fatalf("got %v; want [listen policies.circuit]", got)
 	}
 }
+
+// TestDiffNonReloadableBootBaseline encodes the caller contract: prev is
+// always the STARTUP config. Non-reloadable sections run with boot values
+// forever, so an edited-then-reverted file must diff clean against boot
+// (no false warning), and an edit must keep warning on every subsequent
+// reload, not just the first one after the change.
+func TestDiffNonReloadableBootBaseline(t *testing.T) {
+	boot := diffFixture()
+
+	edited := diffFixture()
+	edited.Policies.Circuit.MinRequests = 99
+
+	// First reload after the edit warns...
+	if got := DiffNonReloadable(boot, edited); !reflect.DeepEqual(got, []string{"policies.circuit"}) {
+		t.Fatalf("edit vs boot: got %v; want [policies.circuit]", got)
+	}
+	// ...and so does every later reload while the file still differs from
+	// boot — the baseline must NOT advance to the last-loaded config (a
+	// last-loaded baseline would return empty here).
+	stillEdited := diffFixture()
+	stillEdited.Policies.Circuit.MinRequests = 99
+	if got := DiffNonReloadable(boot, stillEdited); !reflect.DeepEqual(got, []string{"policies.circuit"}) {
+		t.Fatalf("unchanged edit vs boot: got %v; want [policies.circuit]", got)
+	}
+
+	// Reverting the file to boot values silences the warning — even though
+	// it differs from the previously loaded (edited) config.
+	reverted := diffFixture()
+	if got := DiffNonReloadable(boot, reverted); len(got) != 0 {
+		t.Fatalf("revert-to-boot must not warn; got %v", got)
+	}
+}
+
+// TestDiffNonReloadableClassifiesEveryField is the rot guard: every field
+// of Config and PoliciesConfig must be explicitly classified. Adding a
+// config section without deciding whether DiffNonReloadable should compare
+// it fails this test.
+//
+//	reloadable — applied live by the reload closure (excluded from diff)
+//	diffed     — compared by DiffNonReloadable (warned as ignored-until-restart)
+//	dead       — parsed but not wired to anything yet; classify on implementation
+func TestDiffNonReloadableClassifiesEveryField(t *testing.T) {
+	classification := map[string]string{
+		// Config
+		"Listen":   "diffed",
+		"Log":      "reloadable",
+		"Policies": "diffed", // per-field below
+		"Backends": "reloadable",
+		"Auth":     "dead", // phase 8: classify on implementation
+		// PoliciesConfig
+		"Policies.Failover":         "diffed",
+		"Policies.Hedging":          "diffed",
+		"Policies.Circuit":          "diffed",
+		"Policies.Cache":            "diffed",
+		"Policies.Health":           "diffed",
+		"Policies.Subscriptions":    "diffed",
+		"Policies.DangerousMethods": "diffed",
+	}
+	valid := map[string]bool{"reloadable": true, "diffed": true, "dead": true}
+
+	seen := map[string]bool{}
+	check := func(typ reflect.Type, prefix string) {
+		t.Helper()
+		for i := 0; i < typ.NumField(); i++ {
+			name := prefix + typ.Field(i).Name
+			seen[name] = true
+			class, ok := classification[name]
+			if !ok {
+				t.Errorf("config field %s is not classified — decide whether DiffNonReloadable must compare it (reloadable | diffed | dead) and add it to this map", name)
+				continue
+			}
+			if !valid[class] {
+				t.Errorf("config field %s has invalid classification %q", name, class)
+			}
+		}
+	}
+	check(reflect.TypeOf(Config{}), "")
+	check(reflect.TypeOf(PoliciesConfig{}), "Policies.")
+
+	// Stale entries rot too: every classified name must still exist.
+	for name := range classification {
+		if !seen[name] {
+			t.Errorf("classification entry %s no longer matches any config field — remove or rename it", name)
+		}
+	}
+}

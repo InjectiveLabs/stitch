@@ -2,7 +2,6 @@ package admin
 
 import (
 	"encoding/json"
-	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -12,7 +11,6 @@ import (
 	"github.com/decentrio/stitch/internal/circuit"
 	"github.com/decentrio/stitch/internal/health"
 	"github.com/decentrio/stitch/internal/log"
-	"github.com/decentrio/stitch/internal/types"
 )
 
 // Deps bundles the in-process state the admin endpoints inspect or mutate.
@@ -284,7 +282,3 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 func writeJSONError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
 }
-
-// silence unused-import warnings if downstream stops referencing
-var _ = errors.New
-var _ types.Protocol = ""

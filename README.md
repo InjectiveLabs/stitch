@@ -227,11 +227,16 @@ policies:
     per_attempt_timeout: 5s            # per-upstream deadline
   hedging:
     enabled: true                      # parallel attempt on slow primary
-    methods: [eth_call, abci_query]    # which methods qualify
+                                       # NOTE: hedging currently applies to the EVM
+                                       # JSON-RPC (eth_rpc) listener only; the other
+                                       # listeners (cmt_rpc included) never hedge.
+    methods: [eth_call, eth_estimateGas]   # which methods qualify
                                        # NOTE: hedging is opt-in twice — a method
                                        # hedges only if the built-in manifest flags
                                        # it hedge-safe AND it passes this config.
                                        # An empty list allows every flagged method.
+                                       # Non-EVM methods (e.g. abci_query) are inert
+                                       # here until their listeners learn to hedge.
     hedge_after: 200ms                 # delay before the second request (default 200ms)
   circuit:
     error_threshold: 0.5               # 50% failure rate trips
@@ -396,7 +401,7 @@ stitch_backend_health{backend,protocol}                    # 0|1
 stitch_backend_lag_blocks{backend}
 stitch_circuit_state{backend,protocol}                     # 0=closed,1=half,2=open
 stitch_failover_attempts_total{from,to,reason}
-stitch_cache_total{layer,result}                           # hashidx|response, hit|miss|evict|expired
+stitch_cache_total{layer,result}                           # hashidx|response, hit|miss|evict|expired|purge
 stitch_subscriptions_active{protocol,kind}
 stitch_subscription_resumes_total{reason}
 stitch_broadcast_fanout_total{result}                      # success|partial|total_failure|all_circuited

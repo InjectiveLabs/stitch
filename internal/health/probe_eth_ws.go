@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/rand"
 	"strconv"
@@ -40,6 +41,9 @@ type EthWSProber struct {
 	maxBackoff             time.Duration
 	healthyStreamThreshold time.Duration
 
+	// kick requests an immediate reconciliation (buffered 1; coalesces).
+	kick chan struct{}
+
 	rand *rand.Rand
 	mu   sync.Mutex // guards rand (rand.Rand is not goroutine-safe)
 }
@@ -54,7 +58,19 @@ func NewEthWSProber(reg *backend.Registry, h *Registry) *EthWSProber {
 		baseBackoff:            1 * time.Second,
 		maxBackoff:             30 * time.Second,
 		healthyStreamThreshold: 5 * time.Second,
+		kick:                   make(chan struct{}, 1),
 		rand:                   rand.New(rand.NewSource(time.Now().UnixNano())),
+	}
+}
+
+// Kick requests an immediate reconciliation of trackers against the
+// backend registry — the reload path calls this right after registry.Set
+// so trackers for removed backends are cancelled now rather than at the
+// next refresh tick. Non-blocking; multiple kicks coalesce.
+func (p *EthWSProber) Kick() {
+	select {
+	case p.kick <- struct{}{}:
+	default:
 	}
 }
 
@@ -114,6 +130,8 @@ func (p *EthWSProber) Run(ctx context.Context) {
 			return
 		case <-t.C:
 			reconcile()
+		case <-p.kick:
+			reconcile()
 		}
 	}
 }
@@ -139,6 +157,13 @@ func (p *EthWSProber) trackOne(ctx context.Context, name, ep string) {
 		start := time.Now()
 		err := p.subscribeAndStream(ctx, name, ep)
 		if ctx.Err() != nil {
+			return
+		}
+		if errors.Is(err, errBackendRemoved) {
+			// A hot reload pruned this backend. Reconcile will cancel our
+			// ctx shortly anyway, but exiting now stops the per-block
+			// snapshot/gauge resurrection — and we must not touch the
+			// just-deleted BackendHealth child below.
 			return
 		}
 		// Stream dropped — mark unhealthy so operators see it in dashboards.
@@ -199,6 +224,10 @@ const (
 	wsSubscribeRequest = `{"jsonrpc":"2.0","id":1,"method":"eth_subscribe","params":["newHeads"]}`
 )
 
+// errBackendRemoved signals that the tracked backend disappeared from the
+// registry (hot reload); trackOne exits instead of reconnecting.
+var errBackendRemoved = errors.New("backend removed from registry")
+
 // subscribeAndStream dials ep, sends eth_subscribe newHeads, then loops
 // reading frames and pushing each header into the health registry. Returns
 // on any I/O error or when ctx is cancelled.
@@ -256,6 +285,12 @@ func (p *EthWSProber) subscribeAndStream(ctx context.Context, name, ep string) e
 		height, ok := parseNewHeadsNotification(frame)
 		if !ok || height <= 0 {
 			continue
+		}
+		// A hot reload may have pruned this backend; publishing would
+		// resurrect its snapshot and gauges on every new head until the
+		// next reconcile. Stop the tracker instead.
+		if !p.registry.Has(name) {
+			return errBackendRemoved
 		}
 		snap := Snapshot{
 			Backend:      name,

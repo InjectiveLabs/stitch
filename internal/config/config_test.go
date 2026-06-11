@@ -206,6 +206,14 @@ func TestValidateHedgingAndCacheBounds(t *testing.T) {
 		{"cache ttl negative while enabled", func(c *Config) { c.Policies.Cache.TTL = -time.Second }, "cache.ttl"},
 		{"hash_index_entries negative while enabled", func(c *Config) { c.Policies.Cache.HashIndexEntries = -1 }, "hash_index_entries"},
 		{"response_entries negative while enabled", func(c *Config) { c.Policies.Cache.ResponseEntries = -1 }, "response_entries"},
+		// Both cache structures are built unconditionally at startup, so the
+		// capacity bounds hold even with cache.enabled=false.
+		{"hash_index_entries zero while disabled", func(c *Config) {
+			c.Policies.Cache = CachePolicy{Enabled: false, ResponseEntries: 10}
+		}, "hash_index_entries"},
+		{"response_entries negative while disabled", func(c *Config) {
+			c.Policies.Cache = CachePolicy{Enabled: false, HashIndexEntries: 10, ResponseEntries: -1}
+		}, "response_entries"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -218,12 +226,14 @@ func TestValidateHedgingAndCacheBounds(t *testing.T) {
 		})
 	}
 
-	// Disabled sections tolerate zero values (defaults are not applied here).
+	// Disabled hedging tolerates zero values, and disabled cache tolerates a
+	// zero TTL — but the capacities still apply (the structures are built
+	// regardless of cache.enabled).
 	cfg := base()
 	cfg.Policies.Hedging = HedgingPolicy{}
-	cfg.Policies.Cache = CachePolicy{}
+	cfg.Policies.Cache = CachePolicy{HashIndexEntries: 10, ResponseEntries: 10}
 	if err := Validate(cfg); err != nil {
-		t.Fatalf("disabled hedging/cache should not be validated for bounds: %v", err)
+		t.Fatalf("disabled hedging/zero-ttl cache should pass with sane capacities: %v", err)
 	}
 }
 

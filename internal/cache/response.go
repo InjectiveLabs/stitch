@@ -124,6 +124,7 @@ func (c *ResponseCache) Purge() int {
 	c.entries = make(map[string]*list.Element)
 	c.order.Init()
 	c.bytesIn = 0
+	metrics.CacheTotal.WithLabelValues("response", "purge").Add(float64(n))
 	return n
 }
 

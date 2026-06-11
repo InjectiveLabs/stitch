@@ -5,6 +5,10 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus/testutil"
+
+	"github.com/decentrio/stitch/internal/metrics"
 )
 
 func TestResponseCacheBasic(t *testing.T) {
@@ -102,8 +106,13 @@ func TestResponseCachePurge(t *testing.T) {
 	if c.Bytes() == 0 {
 		t.Fatal("expected non-zero byte accounting before purge")
 	}
+	purged := metrics.CacheTotal.WithLabelValues("response", "purge")
+	before := testutil.ToFloat64(purged)
 	if n := c.Purge(); n != 4 {
 		t.Errorf("purge returned %d; want 4", n)
+	}
+	if got := testutil.ToFloat64(purged) - before; got != 4 {
+		t.Errorf("cache_total{response,purge} advanced by %v; want 4", got)
 	}
 	if c.Size() != 0 {
 		t.Errorf("size after purge: %d", c.Size())

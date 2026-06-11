@@ -201,6 +201,12 @@ func (v *BoundedVerifier) fetchEthBlock(ctx context.Context, ep string, height i
 // single write satisfies eligibility lookups for ClassByHeight / ClassByHash
 // regardless of which protocol the client used.
 func (v *BoundedVerifier) publish(b *backend.Backend, healthy bool, lastError string) {
+	// A hot reload may have pruned this backend while verification was in
+	// flight (retries span tens of seconds); publishing now would resurrect
+	// its snapshot and gauges.
+	if !v.registry.Has(b.Name) {
+		return
+	}
 	snap := Snapshot{
 		Backend:      b.Name,
 		Protocol:     types.ProtoRPC,

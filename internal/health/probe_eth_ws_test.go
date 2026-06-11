@@ -3,6 +3,7 @@ package health
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -253,6 +254,118 @@ func TestEthWSProberReconnectAfterDrop(t *testing.T) {
 	}
 
 	cancel()
+}
+
+// TestEthWSProberStopsPublishingForRemovedBackend covers the reload-prune
+// race: the backend is removed from the registry (and its snapshots pruned)
+// while the head stream is still up. The next pushed head must NOT
+// resurrect the snapshot; the stream loop must exit with errBackendRemoved
+// instead of reconnecting.
+func TestEthWSProberStopsPublishingForRemovedBackend(t *testing.T) {
+	mock := newWSBackendMock(t)
+
+	bs := []*backend.Backend{{
+		Name:      "tip",
+		Endpoints: map[types.Protocol]string{types.ProtoEthWS: mock.URL()},
+	}}
+	reg := backend.NewRegistry(bs)
+	h := NewRegistry()
+	p := NewEthWSProber(reg, h)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- p.subscribeAndStream(ctx, "tip", mock.URL()) }()
+
+	deadline := time.After(2 * time.Second)
+	for mock.subAcked.Load() == 0 {
+		select {
+		case <-deadline:
+			t.Fatal("subscribe never acked")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+
+	// First head lands as a snapshot while the backend is registered.
+	mock.emit(t, 100)
+	deadline = time.After(2 * time.Second)
+	for {
+		if snap, ok := h.Get("tip", types.ProtoEthWS); ok && snap.LatestHeight == 100 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("initial snapshot never landed")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+
+	// Reload removes the backend: registry swap + health prune, exactly
+	// like the reload closure in cmd/start.go.
+	reg.Set(nil)
+	h.Prune(map[string]struct{}{})
+
+	// Push a couple more heads; the prober must bail on the first one
+	// rather than re-publishing.
+	mock.emit(t, 101)
+	select {
+	case err := <-done:
+		if !errors.Is(err, errBackendRemoved) {
+			t.Fatalf("subscribeAndStream returned %v; want errBackendRemoved", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("subscribeAndStream kept streaming after backend removal")
+	}
+
+	if snap, ok := h.Get("tip", types.ProtoEthWS); ok {
+		t.Errorf("pruned snapshot was resurrected: %+v", snap)
+	}
+}
+
+// TestEthWSProberKickReconcilesImmediately verifies the reload nudge: with
+// the refresh ticker effectively disabled, removing the backend and calling
+// Kick must cancel its tracker right away (no reconnect attempts).
+func TestEthWSProberKickReconcilesImmediately(t *testing.T) {
+	mock := newWSBackendMock(t)
+
+	reg := backend.NewRegistry([]*backend.Backend{{
+		Name:      "tip",
+		Endpoints: map[types.Protocol]string{types.ProtoEthWS: mock.URL()},
+	}})
+	h := NewRegistry()
+	p := NewEthWSProber(reg, h)
+	p.refresh = time.Hour // only Kick can trigger a reconcile in this test
+	p.baseBackoff = 20 * time.Millisecond
+	p.maxBackoff = 50 * time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go p.Run(ctx)
+
+	deadline := time.After(2 * time.Second)
+	for mock.subAcked.Load() == 0 {
+		select {
+		case <-deadline:
+			t.Fatal("subscribe never acked")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+
+	// Remove the backend and kick — the tracker's ctx must be cancelled
+	// without waiting for the (hour-long) ticker.
+	reg.Set(nil)
+	p.Kick()
+
+	// The cancelled tracker closes its conn; killing the server side too
+	// must not provoke a reconnect (subAcked stays put).
+	time.Sleep(100 * time.Millisecond)
+	mock.killOldestConn(t)
+	start := mock.subAcked.Load()
+	time.Sleep(300 * time.Millisecond)
+	if got := mock.subAcked.Load(); got > start {
+		t.Errorf("tracker reconnected after kick-driven removal: acks %d -> %d", start, got)
+	}
 }
 
 func TestEthWSProberBackendChurn(t *testing.T) {

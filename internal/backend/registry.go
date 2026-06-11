@@ -54,6 +54,15 @@ func (r *Registry) Find(name string) *Backend {
 	return nil
 }
 
+// Has reports whether the current snapshot contains a backend with the
+// given name. Probers consult this immediately before publishing health
+// snapshots or per-backend metric gauges, so an in-flight probe can't
+// resurrect a backend that a hot reload just pruned. Linear scan over the
+// atomic snapshot — backends are few.
+func (r *Registry) Has(name string) bool {
+	return r.Find(name) != nil
+}
+
 // Drain marks a backend as drained — selector skips it. No-op if the
 // backend doesn't exist in the current snapshot (we still record the
 // drain so a future reload that re-adds the name picks it up drained).

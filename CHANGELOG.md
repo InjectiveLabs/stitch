@@ -7,6 +7,32 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Added
+
+- `policies.cache.ttl`, `policies.cache.hash_index_entries`, and
+  `policies.cache.response_entries` are now wired: they size the hash→height
+  index and the response cache and set the response-entry lifetime
+  (previously parsed but ignored). `policies.hedging.hedge_after` likewise
+  controls the hedge delay for real.
+- Hot reload now warns about edited config sections that only apply at
+  startup (`listen`, `policies.*`), diffed against the **boot** config so
+  the warning repeats on every reload while the file diverges and stays
+  silent when it reverts.
+- Hot reload prunes health snapshots, circuit breakers, and their
+  per-backend metric gauge children for backends the new config no longer
+  declares; in-flight probes and the eth_ws head tracker can no longer
+  resurrect a pruned backend. Cumulative counters (`stitch_requests_total`
+  etc.) are deliberately retained as history.
+- `POST /admin/cache/purge` actually purges both caches and reports per-cache
+  purged-entry counts (was a stub that purged nothing); purges are counted in
+  `stitch_cache_total{result="purge"}`.
+
+### Removed
+
+- `policies.hedging.after_pct_of_p95` — the knob was never wired to
+  anything. Config parsing is strict, so configs still setting it will now
+  fail to load; delete the line (use `hedge_after` for the hedge delay).
+
 ### Fixed
 
 - Graceful shutdown returns as soon as every listener has drained instead of
@@ -18,6 +44,11 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Changed
 
+- **BEHAVIOR**: hedging is now genuinely config-gated. Configs without
+  `policies.hedging.enabled: true` no longer hedge at all; previously the
+  manifest's hedge-safe flag alone enabled hedging on the EVM JSON-RPC
+  listener regardless of config. Hedging still applies to the eth_rpc
+  listener only.
 - Bounded-coverage backends are verified once at startup (with retry) instead
   of being probed every `probe_interval`; their coverage is static, so
   periodic `/status` polls were wasted work.

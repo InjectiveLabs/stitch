@@ -4,6 +4,10 @@ import (
 	"strconv"
 	"sync"
 	"testing"
+
+	"github.com/prometheus/client_golang/prometheus/testutil"
+
+	"github.com/decentrio/stitch/internal/metrics"
 )
 
 func TestHashIndexBasic(t *testing.T) {
@@ -86,8 +90,13 @@ func TestHashIndexPurge(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		h.Set("h"+strconv.Itoa(i), int64(i+1))
 	}
+	purged := metrics.CacheTotal.WithLabelValues("hashidx", "purge")
+	before := testutil.ToFloat64(purged)
 	if n := h.Purge(); n != 5 {
 		t.Errorf("purge returned %d; want 5", n)
+	}
+	if got := testutil.ToFloat64(purged) - before; got != 5 {
+		t.Errorf("cache_total{hashidx,purge} advanced by %v; want 5", got)
 	}
 	if h.Size() != 0 {
 		t.Errorf("size after purge: %d", h.Size())

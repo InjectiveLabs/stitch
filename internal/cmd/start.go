@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"runtime"
+	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -86,11 +87,13 @@ func startCmd() *cobra.Command {
 			defer cancel()
 
 			// Start health probers as goroutines (not as managed servers; they
-			// have no listen socket).
+			// have no listen socket). The eth_ws prober keeps a handle so the
+			// reload path can kick an immediate reconcile after pruning.
+			ethWSProber := health.NewEthWSProber(reg, h)
 			go health.NewRPCProber(reg, h, cfg.Policies.Health.ProbeInterval).Run(ctx)
 			go health.NewRESTProber(reg, h, cfg.Policies.Health.ProbeInterval).Run(ctx)
 			go health.NewGRPCProber(reg, grpcPool, h, cfg.Policies.Health.ProbeInterval).Run(ctx)
-			go health.NewEthWSProber(reg, h).Run(ctx)
+			go ethWSProber.Run(ctx)
 			go health.NewBoundedVerifier(reg, h).Run(ctx)
 			go grpcPool.RunEvictor(ctx, time.Minute)
 
@@ -147,7 +150,18 @@ func startCmd() *cobra.Command {
 				mgr.Add(inj_ws.New(cfg.Listen.InjWS.Addr, selCore))
 			}
 
+			// Non-reloadable sections keep running with the BOOT config no
+			// matter how many reloads happen, so the "ignored until restart"
+			// warning must always diff against the config the process started
+			// with — not the last-loaded one (which would warn only once and
+			// false-warn when a file reverts to boot values).
+			bootCfg := cfg
+			// reload's multi-step body (load, swap, prune, kick) must not
+			// interleave: SIGHUP and POST /admin/reload can fire concurrently.
+			var reloadMu sync.Mutex
 			reload := func() error {
+				reloadMu.Lock()
+				defer reloadMu.Unlock()
 				next, err := config.Load(configPath)
 				if err != nil {
 					return err
@@ -156,21 +170,26 @@ func startCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				prev := holder.Swap(next)
+				holder.Swap(next) // registry of last-loaded config
 				reg.Set(newBackends)
-				// Drop health snapshots (and their metrics) for backends the
-				// new config no longer declares.
+				// Drop health snapshots and circuit breakers (and their
+				// per-backend metric children) for backends the new config no
+				// longer declares. Counter families (RequestsTotal etc.) are
+				// deliberately left alone — they're cumulative history, and
+				// rates over them decay on their own.
 				active := make(map[string]struct{}, len(newBackends))
 				for _, b := range newBackends {
 					active[b.Name] = struct{}{}
 				}
-				h.Prune(func(name string) bool {
-					_, ok := active[name]
-					return ok
-				})
+				h.Prune(active)
+				cmgr.Prune(active)
+				// Reconcile the eth_ws head trackers NOW so a removed
+				// backend's newHeads stream stops resurrecting pruned
+				// snapshots instead of surviving until the next 30s tick.
+				ethWSProber.Kick()
 				// Only backends and log apply live; tell the operator what
 				// they changed that won't take effect until restart.
-				if ignored := config.DiffNonReloadable(prev, next); len(ignored) > 0 {
+				if ignored := config.DiffNonReloadable(bootCfg, next); len(ignored) > 0 {
 					log.L().Warn("reload: changes ignored until restart", "sections", ignored)
 				}
 				return log.Init(next.Log.Level, next.Log.Format, nil)
