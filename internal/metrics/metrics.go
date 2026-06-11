@@ -108,7 +108,7 @@ var (
 		prometheus.CounterOpts{
 			Namespace: Namespace,
 			Name:      "subscription_dropped_notifications_total",
-			Help:      "Upstream notifications dropped instead of forwarded, by protocol and reason.",
+			Help:      "Upstream notifications dropped because they matched no live subscription, by protocol and reason.",
 		},
 		[]string{"protocol", "reason"},
 	)

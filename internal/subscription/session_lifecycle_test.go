@@ -66,9 +66,8 @@ func (g gatedSelector) Candidates(types.RouteKey) []*backend.Backend {
 // for a bare send, "select" when the send is raced against done; a reader
 // parked in ReadMessage shows "IO wait" and matches neither.
 func goroutineBlockedInSend(fn string) bool {
-	buf := make([]byte, 1<<20)
-	n := runtime.Stack(buf, true)
-	for _, g := range strings.Split(string(buf[:n]), "\n\n") {
+	s := allStacks()
+	for _, g := range strings.Split(s, "\n\n") {
 		if strings.Contains(g, fn) &&
 			(strings.Contains(g, "[chan send") || strings.Contains(g, "[select")) {
 			return true
@@ -79,9 +78,21 @@ func goroutineBlockedInSend(fn string) bool {
 
 // goroutineExists reports whether any goroutine stack mentions fn.
 func goroutineExists(fn string) bool {
+	return strings.Contains(allStacks(), fn)
+}
+
+// allStacks returns the full goroutine dump, growing the buffer until
+// runtime.Stack fills less than the allocated capacity (max 64 MiB).
+func allStacks() string {
+	const maxBuf = 64 << 20
 	buf := make([]byte, 1<<20)
-	n := runtime.Stack(buf, true)
-	return strings.Contains(string(buf[:n]), fn)
+	for {
+		n := runtime.Stack(buf, true)
+		if n < len(buf) || len(buf) >= maxBuf {
+			return string(buf[:n])
+		}
+		buf = make([]byte, len(buf)*2)
+	}
 }
 
 // pollUntil retries cond every 10ms until it holds or the deadline expires.

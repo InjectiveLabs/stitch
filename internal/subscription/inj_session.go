@@ -87,8 +87,8 @@ func NewInjSession(client *websocket.Conn, cfg InjSessionConfig) *InjSession {
 func (s *InjSession) Run(ctx context.Context) error {
 	defer s.closeClient(websocket.CloseGoingAway, "session ending")
 	defer metrics.SubscriptionsActive.WithLabelValues(string(types.ProtoChainStream), "inj_ws").Dec()
-	metrics.SubscriptionsActive.WithLabelValues(string(types.ProtoChainStream), "inj_ws").Inc()
 	defer close(s.done) // every return stops draining clientCh; release the reader
+	metrics.SubscriptionsActive.WithLabelValues(string(types.ProtoChainStream), "inj_ws").Inc()
 
 	clientCh := make(chan []byte, 32)
 	clientErrCh := make(chan error, 1)

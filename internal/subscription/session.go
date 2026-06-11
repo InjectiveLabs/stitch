@@ -87,8 +87,8 @@ func NewSession(client *websocket.Conn, cfg SessionConfig) *Session {
 func (s *Session) Run(ctx context.Context) error {
 	defer s.closeClient(websocket.CloseGoingAway, "session ending")
 	defer metrics.SubscriptionsActive.WithLabelValues(string(types.ProtoEthWS), "session").Dec()
-	metrics.SubscriptionsActive.WithLabelValues(string(types.ProtoEthWS), "session").Inc()
 	defer close(s.done) // every return stops draining clientCh; release the reader
+	metrics.SubscriptionsActive.WithLabelValues(string(types.ProtoEthWS), "session").Inc()
 
 	clientCh := make(chan []byte, 32)
 	clientErrCh := make(chan error, 1)
