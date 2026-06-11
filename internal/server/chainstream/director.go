@@ -293,6 +293,11 @@ var (
 // server-stream ctx is already done, the client vanished and the failure
 // indicts nobody (errClientGone → admission released); otherwise the
 // upstream is at fault (errUpstreamGone → failure recorded, resume).
+// Note: this deliberately differs from cosmos_grpc/handler.go — for a
+// long-lived flowing stream, the client's deadline expiring is client
+// policy (the stream lived as long as the client wanted), not backend
+// failure, so ctx-done for any cause (Canceled or DeadlineExceeded)
+// maps to client-gone here.
 func attributeErr(ctx context.Context) error {
 	if ctx.Err() != nil {
 		return errClientGone

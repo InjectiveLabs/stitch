@@ -2,6 +2,7 @@ package cosmos_grpc
 
 import (
 	"context"
+	"errors"
 
 	"github.com/mwitkow/grpc-proxy/proxy"
 	"google.golang.org/grpc"
@@ -28,12 +29,13 @@ func streamHandler(dir *Director) grpc.StreamHandler {
 			switch {
 			case err == nil:
 				dir.RecordOutcome(name, true)
-			case ss.Context().Err() != nil:
-				// The client vanished mid-RPC: the error indicts nobody.
-				// Recording would debit an innocent backend; skipping the
-				// resolution would strand a claimed half-open canary slot —
-				// so release the admission (the forwarder's drainResults
-				// convention).
+			case errors.Is(ss.Context().Err(), context.Canceled):
+				// Convention (mirrors forwarder/broadcast.go drainResults):
+				//   cancellation  = client walked away, neutral Release;
+				//   deadline expiry = backend too slow, recorded failure.
+				// A DeadlineExceeded context means the backend hung until the
+				// client's gRPC deadline fired — that should be debited, so it
+				// falls through to RecordOutcome(name, false) below.
 				dir.ReleaseOutcome(name)
 			default:
 				dir.RecordOutcome(name, false)
