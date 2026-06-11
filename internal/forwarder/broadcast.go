@@ -91,7 +91,16 @@ func (f *HTTP) Broadcast(w http.ResponseWriter, r *http.Request, key types.Route
 			break
 		}
 		failures = append(failures, res)
-		f.circuit.Record(res.backend, key.Protocol, false)
+		// A leg cancelled before any winner exists means the CLIENT went
+		// away; that indicts nobody. Release the admission instead of
+		// recording a failure — the same convention drainResults applies
+		// to post-winner losers. Deadline expiry is NOT cancellation: a
+		// timed-out leg still debits its backend below.
+		if errors.Is(res.err, context.Canceled) {
+			f.circuit.Release(res.backend, key.Protocol)
+		} else {
+			f.circuit.Record(res.backend, key.Protocol, false)
+		}
 	}
 
 	if winner == nil {

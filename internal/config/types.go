@@ -83,7 +83,6 @@ type HedgingPolicy struct {
 	Enabled    bool          `yaml:"enabled"`
 	Methods    []string      `yaml:"methods,omitempty"`
 	HedgeAfter time.Duration `yaml:"hedge_after,omitempty"`
-	MaxHedge   time.Duration `yaml:"max_hedge,omitempty"`
 }
 
 type CircuitPolicy struct {

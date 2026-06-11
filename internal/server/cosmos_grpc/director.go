@@ -122,7 +122,6 @@ func (d *Director) Direct(ctx context.Context, fullMethodName string) (context.C
 			metrics.FailoverAttempts.WithLabelValues(b.Name, "next", "dial").Inc()
 			continue
 		}
-		d.pool.Touch(b.Name)
 		ctx = log.WithBackend(ctx, b.Name)
 		if slot := chosenSlot(ctx); slot != nil {
 			slot.Set(b.Name)

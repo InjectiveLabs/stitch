@@ -283,6 +283,54 @@ func TestInjWSMulticastRejectsNonSubscribeFrames(t *testing.T) {
 	}
 }
 
+// TestInjWSMulticastParseErrorReply pins the -32700 contract: the 1:1
+// session forwards unparseable frames upstream, but multicast has no
+// per-client upstream to delegate to, so the session answers the parse
+// error itself — id null (the request id is unknowable from a frame that
+// didn't parse) — and the session survives the bad frame.
+func TestInjWSMulticastParseErrorReply(t *testing.T) {
+	up := newMCMock(t, 1, 0, 0)
+	_, front := setupMulticastRig(t, SubscriptionOptions{}, up)
+
+	c := dial(t, front.URL)
+	defer c.Close()
+
+	if err := c.WriteMessage(websocket.TextMessage, []byte(`{"jsonrpc":"2.0",`)); err != nil {
+		t.Fatal(err)
+	}
+	var resp struct {
+		ID    json.RawMessage `json:"id"`
+		Error struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	readJSON(t, c, &resp)
+	if resp.Error.Code != -32700 {
+		t.Errorf("expected -32700 for an unparseable frame; got %+v", resp)
+	}
+	if string(resp.ID) != "null" {
+		t.Errorf("parse-error reply id = %s; want null", string(resp.ID))
+	}
+	if !strings.Contains(resp.Error.Message, "parse") {
+		t.Errorf("error message should say parse; got %q", resp.Error.Message)
+	}
+
+	// The bad frame must not end the session: a well-formed subscribe on
+	// the same connection still succeeds.
+	if err := c.WriteMessage(websocket.TextMessage, []byte(`{"jsonrpc":"2.0","id":7,"method":"subscribe","params":{"subscription_id":"after-garbage","filter":{}}}`)); err != nil {
+		t.Fatal(err)
+	}
+	var ack struct {
+		ID     int    `json:"id"`
+		Result string `json:"result"`
+	}
+	readJSON(t, c, &ack)
+	if ack.Result != "success" || ack.ID != 7 {
+		t.Errorf("subscribe after a parse error: %+v", ack)
+	}
+}
+
 // TestInjWSMulticastUnsubscribeReleasesUpstream: unsubscribe replies
 // success and the hub tears the upstream down once its last subscriber
 // is gone.

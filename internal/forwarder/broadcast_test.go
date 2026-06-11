@@ -89,6 +89,64 @@ func TestDrainResultsReleasesCancelledLoser(t *testing.T) {
 	}
 }
 
+// A leg cancelled BEFORE any winner exists — the client disconnected
+// mid-broadcast — says nothing about its backend either: the pre-winner
+// result loop must release the admission, not record a failure (the
+// convention drainResults already applies to post-winner losers).
+func TestBroadcastClientDisconnectReleasesPreWinnerLeg(t *testing.T) {
+	inFlight := make(chan struct{}, 1)
+	release := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		select {
+		case inFlight <- struct{}{}:
+		default:
+		}
+		<-release // park the leg; the cancelled client errors out long before this opens
+	}))
+	defer upstream.Close()
+	defer close(release)
+
+	cm := circuit.NewManager(circuit.Policy{
+		ErrorThreshold: 0.5,
+		MinRequests:    2,
+		OpenDuration:   10 * time.Millisecond,
+	})
+	cm.Record("a", types.ProtoRPC, false)
+	cm.Record("a", types.ProtoRPC, false) // tripped
+	time.Sleep(15 * time.Millisecond)     // cooldown elapses; Broadcast's Acquire claims the canary
+
+	fwd := newForwarderWithCircuit(stubSelector{cands: []*backend.Backend{mkBackend("a", upstream.URL)}}, cm, 3)
+	key := types.RouteKey{Protocol: types.ProtoRPC, Method: "broadcast_tx_sync", Class: types.ClassBroadcast, Idempotent: false}
+
+	cctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		rec := httptest.NewRecorder()
+		r := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"method":"broadcast_tx_sync"}`)).WithContext(cctx)
+		fwd.Broadcast(rec, r, key)
+	}()
+
+	select {
+	case <-inFlight: // the canary leg is parked in the upstream handler
+	case <-time.After(2 * time.Second):
+		t.Fatal("broadcast leg never reached the upstream")
+	}
+	cancel() // client disconnects before any winner
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Broadcast did not return after the client disconnect")
+	}
+
+	if st := cm.State("a", types.ProtoRPC); st != circuit.StateHalfOpen {
+		t.Errorf("pre-winner cancelled leg must not resolve the breaker; state=%s", st)
+	}
+	if !cm.Acquire("a", types.ProtoRPC) {
+		t.Error("cancelled leg's canary slot must be free again")
+	}
+}
+
 // While a half-open canary broadcast is in flight, a second Broadcast must
 // be rejected: dispatching claims the slot, not just reads it.
 func TestBroadcastCanaryClaimedWhileInFlight(t *testing.T) {

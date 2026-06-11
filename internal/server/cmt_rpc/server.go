@@ -15,6 +15,7 @@ import (
 	"github.com/decentrio/stitch/internal/forwarder"
 	"github.com/decentrio/stitch/internal/log"
 	"github.com/decentrio/stitch/internal/runtime"
+	"github.com/decentrio/stitch/internal/server"
 	"github.com/decentrio/stitch/internal/types"
 )
 
@@ -121,25 +122,25 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				_, _ = w.Write(hit)
 				return
 			}
-			cap := newCMTCapture(w.Header())
+			cap := server.NewCapture(w.Header())
 			cap.Header().Set("x-stitch-cache", "miss")
 			dispatch(cap, r, d.key)
-			cap.flushTo(w)
-			if cap.status >= 200 && cap.status < 300 {
-				s.respCache.Set(cacheKey, cap.body.Bytes(), s.cacheTTL)
+			cap.FlushTo(w)
+			if cap.Status() >= 200 && cap.Status() < 300 {
+				s.respCache.Set(cacheKey, cap.BodyBytes(), s.cacheTTL)
 			}
 			if s.cache != nil && cmtPopulatable(d.key.Method) {
-				cache.PopulateFromCMTResponse(s.cache, d.key.Method, cap.body.Bytes())
+				cache.PopulateFromCMTResponse(s.cache, d.key.Method, cap.BodyBytes())
 			}
 			return
 		}
 	}
 
 	if s.cache != nil && cmtPopulatable(d.key.Method) {
-		cap := newCMTCapture(w.Header())
+		cap := server.NewCapture(w.Header())
 		dispatch(cap, r, d.key)
-		cap.flushTo(w)
-		cache.PopulateFromCMTResponse(s.cache, d.key.Method, cap.body.Bytes())
+		cap.FlushTo(w)
+		cache.PopulateFromCMTResponse(s.cache, d.key.Method, cap.BodyBytes())
 		return
 	}
 	dispatch(w, r, d.key)
@@ -175,33 +176,6 @@ func cmtPopulatable(method string) bool {
 		return true
 	}
 	return false
-}
-
-// cmtCapture buffers the upstream response so we can both write it
-// through to the client and parse it for hash↔height bindings. Mirrors
-// eth_rpc's capture; kept separate to avoid an import cycle.
-type cmtCapture struct {
-	header http.Header
-	status int
-	body   bytes.Buffer
-}
-
-func newCMTCapture(parent http.Header) *cmtCapture {
-	return &cmtCapture{header: parent.Clone(), status: 200}
-}
-
-func (c *cmtCapture) Header() http.Header         { return c.header }
-func (c *cmtCapture) WriteHeader(code int)        { c.status = code }
-func (c *cmtCapture) Write(b []byte) (int, error) { return c.body.Write(b) }
-
-func (c *cmtCapture) flushTo(w http.ResponseWriter) {
-	for k, vs := range c.header {
-		for _, v := range vs {
-			w.Header().Add(k, v)
-		}
-	}
-	w.WriteHeader(c.status)
-	_, _ = w.Write(c.body.Bytes())
 }
 
 func websocketStub(w http.ResponseWriter, _ *http.Request) {

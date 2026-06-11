@@ -13,6 +13,7 @@ import (
 	"github.com/decentrio/stitch/internal/forwarder"
 	"github.com/decentrio/stitch/internal/log"
 	"github.com/decentrio/stitch/internal/runtime"
+	"github.com/decentrio/stitch/internal/server"
 	"github.com/decentrio/stitch/internal/types"
 )
 
@@ -214,15 +215,15 @@ func (s *Server) handleSingle(w http.ResponseWriter, r *http.Request, body []byt
 				return
 			}
 			// Miss — capture, forward, populate.
-			cap := newCapture(w.Header())
+			cap := server.NewCapture(w.Header())
 			cap.Header().Set("x-stitch-cache", "miss")
 			dispatch(cap, r.WithContext(ctx), d.key)
-			cap.flushTo(w)
-			if cap.status >= 200 && cap.status < 300 {
-				s.respCache.Set(cacheKey, cap.body.Bytes(), s.cacheTTL)
+			cap.FlushTo(w)
+			if cap.Status() >= 200 && cap.Status() < 300 {
+				s.respCache.Set(cacheKey, cap.BodyBytes(), s.cacheTTL)
 			}
 			if s.cache != nil && shouldPopulateCache(d.method) {
-				cache.PopulateFromEthResponse(s.cache, d.method, cap.body.Bytes())
+				cache.PopulateFromEthResponse(s.cache, d.method, cap.BodyBytes())
 			}
 			return
 		}
@@ -232,10 +233,10 @@ func (s *Server) handleSingle(w http.ResponseWriter, r *http.Request, body []byt
 	// the hash index, capture the response so we can populate after
 	// forwarding it through to the client.
 	if s.cache != nil && shouldPopulateCache(d.method) {
-		cap := newCapture(w.Header())
+		cap := server.NewCapture(w.Header())
 		dispatch(cap, r.WithContext(ctx), d.key)
-		cap.flushTo(w)
-		cache.PopulateFromEthResponse(s.cache, d.method, cap.body.Bytes())
+		cap.FlushTo(w)
+		cache.PopulateFromEthResponse(s.cache, d.method, cap.BodyBytes())
 		return
 	}
 
@@ -310,9 +311,9 @@ func (s *Server) handleBatch(w http.ResponseWriter, r *http.Request, body []byte
 	results := make([]json.RawMessage, len(raw))
 
 	for i := range raw {
-		rec := newCapture(parentHeader)
+		rec := server.NewCapture(parentHeader)
 		s.handleSingle(rec, r, raw[i])
-		results[i] = rec.body.Bytes()
+		results[i] = rec.BodyBytes()
 	}
 
 	w.WriteHeader(http.StatusOK)
@@ -345,9 +346,9 @@ func (s *Server) handleBatch(w http.ResponseWriter, r *http.Request, body []byte
 func (s *Server) handleFilterCall(w http.ResponseWriter, r *http.Request, d decoded, body []byte) {
 	r.Body = io.NopCloser(bytes.NewReader(body))
 	r.ContentLength = int64(len(body))
-	cap := newCapture(w.Header())
+	cap := server.NewCapture(w.Header())
 	s.fwd.Forward(cap, r, d.key)
-	cap.flushTo(w)
+	cap.FlushTo(w)
 
 	if d.expectFilterMint {
 		// Parse the captured response; if it's a JSON-RPC ok with a string
@@ -355,7 +356,7 @@ func (s *Server) handleFilterCall(w http.ResponseWriter, r *http.Request, d deco
 		var resp struct {
 			Result string `json:"result"`
 		}
-		if err := json.Unmarshal(cap.body.Bytes(), &resp); err == nil && resp.Result != "" {
+		if err := json.Unmarshal(cap.BodyBytes(), &resp); err == nil && resp.Result != "" {
 			// We don't currently know which backend served the mint; the
 			// FilterStore binds to "_unknown_" so phase 3 still tracks the
 			// id but routes via the standard selector for now. Phase 6 will
@@ -366,35 +367,6 @@ func (s *Server) handleFilterCall(w http.ResponseWriter, r *http.Request, d deco
 	if d.followFilterID != "" && d.method == "eth_uninstallFilter" {
 		s.filters.Forget(d.followFilterID)
 	}
-}
-
-// capture is a tiny ResponseWriter that buffers status/body for batching
-// and filter bookkeeping.
-type capture struct {
-	header http.Header
-	status int
-	body   bytes.Buffer
-}
-
-func newCapture(parent http.Header) *capture {
-	return &capture{header: parent.Clone(), status: 200}
-}
-
-func (c *capture) Header() http.Header  { return c.header }
-func (c *capture) WriteHeader(code int) { c.status = code }
-func (c *capture) Write(b []byte) (int, error) {
-	return c.body.Write(b)
-}
-
-// flushTo copies the captured response onto a real ResponseWriter.
-func (c *capture) flushTo(w http.ResponseWriter) {
-	for k, vs := range c.header {
-		for _, v := range vs {
-			w.Header().Add(k, v)
-		}
-	}
-	w.WriteHeader(c.status)
-	_, _ = w.Write(c.body.Bytes())
 }
 
 // JSON-RPC framing helpers ---------------------------------------------

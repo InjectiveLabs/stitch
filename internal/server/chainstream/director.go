@@ -276,7 +276,6 @@ func (d *Director) pickConn(ctx context.Context, avoid string) (string, *grpc.Cl
 			d.circuit.Record(b.Name, types.ProtoChainStream, false)
 			continue
 		}
-		d.pool.Touch(b.Name)
 		return b.Name, conn
 	}
 	return "", nil

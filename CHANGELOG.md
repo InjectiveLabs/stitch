@@ -56,6 +56,8 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - `policies.hedging.after_pct_of_p95` — the knob was never wired to
   anything. Config parsing is strict, so configs still setting it will now
   fail to load; delete the line (use `hedge_after` for the hedge delay).
+- `policies.hedging.max_hedge` — likewise declared but read by nothing.
+  Strict parsing now rejects configs still setting it; delete the line.
 
 ### Fixed
 

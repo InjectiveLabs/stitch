@@ -41,7 +41,8 @@ func NewGRPCPool(idleTimeout time.Duration) *GRPCPool {
 }
 
 // Conn returns a client connection for the given (backend, address). It
-// (re)dials if the existing conn is closed.
+// (re)dials if the existing conn is closed. Every call marks the entry
+// just-used for idle eviction — callers need no separate touch.
 func (p *GRPCPool) Conn(ctx context.Context, backend, addr string) (*grpc.ClientConn, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -63,16 +64,6 @@ func (p *GRPCPool) Conn(ctx context.Context, backend, addr string) (*grpc.Client
 	}
 	p.conns[backend] = &entry{conn: conn, addr: addr, lastUsed: time.Now()}
 	return conn, nil
-}
-
-// Touch records that a connection was just used; called by the director
-// after a successful RPC. Cheap.
-func (p *GRPCPool) Touch(backend string) {
-	p.mu.Lock()
-	if e, ok := p.conns[backend]; ok {
-		e.lastUsed = time.Now()
-	}
-	p.mu.Unlock()
 }
 
 // CloseAll tears down every cached connection. Called at shutdown.
