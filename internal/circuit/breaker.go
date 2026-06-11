@@ -6,11 +6,6 @@
 //	open → half-open    on Acquire after open_duration (caller becomes the canary)
 //	half-open → closed  on a successful canary
 //	half-open → open    on a failed canary (with exponential backoff)
-//	open → closed       on a success recorded after open_duration — legacy
-//	                    Allow→Record callers (the gRPC/chainstream directors);
-//	                    goes away once the directors migrate to Acquire
-//	open → open         on a failure recorded after open_duration: re-trip
-//	                    with doubled backoff — same legacy-caller path
 //
 // The API is split between filtering and admission. Allow is read-only —
 // the selector calls it to filter candidates and it never transitions
@@ -163,9 +158,11 @@ func (b *Breaker) Release() {
 	}
 }
 
-// Record reports the outcome of a request. Failures may trip the breaker;
-// successes may close it. Resolving a half-open canary — success or failure
-// — releases the canary slot.
+// Record reports the outcome of a request. Closed-state failures may trip
+// the breaker; resolving a half-open canary — success or failure — closes
+// or re-trips it and releases the canary slot. Open-state records are
+// samples only: with every sender holding an admission from Acquire, an
+// outcome arriving while open is by definition stale pre-trip evidence.
 func (b *Breaker) Record(success bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -197,18 +194,11 @@ func (b *Breaker) Record(success bool) {
 			b.tripLocked()
 		}
 	case StateOpen:
-		// Before the cooldown elapses this is a late result from a request
-		// dispatched pre-trip: sample it, change nothing. After the
-		// cooldown it is the outcome of a caller that gated on Allow alone
-		// (no Acquire — e.g. the gRPC directors): resolve it like a canary
-		// so those callers still close or re-trip the breaker.
-		if b.cooldownElapsed() {
-			if success {
-				b.closeLocked()
-			} else {
-				b.tripLocked()
-			}
-		}
+		// A late result from a request dispatched pre-trip — even one
+		// resolving only after the cooldown elapsed: sample it, change
+		// nothing. Open-state resolution belongs to canaries admitted via
+		// Acquire (handled under StateHalfOpen above); an un-admitted
+		// outcome never closes or re-trips the breaker.
 	}
 }
 
@@ -227,10 +217,10 @@ func (b *Breaker) cooldownElapsed() bool {
 }
 
 // tripLocked moves the breaker to open. A fresh trip from closed starts at
-// the base OpenDuration; a re-trip — a failed canary, or a post-cooldown
-// failure while still open — doubles the cooldown up to 8× base. Callers
-// hold mu. openedAt is stored before the state so a concurrent Allow never
-// sees the open state with a stale timestamp.
+// the base OpenDuration; a re-trip (a failed half-open canary) doubles the
+// cooldown up to 8× base. Callers hold mu. openedAt is stored before the
+// state so a concurrent Allow never sees the open state with a stale
+// timestamp.
 func (b *Breaker) tripLocked() {
 	base := b.policy.OpenDuration.Nanoseconds()
 	if State(b.state.Load()) == StateClosed {

@@ -277,8 +277,11 @@ func TestBreakerConcurrentFailuresTripOnce(t *testing.T) {
 	}
 }
 
-// Outcomes of requests dispatched before a trip arrive while the breaker is
-// open and the cooldown is still running: they are samples only.
+// Outcomes of requests dispatched before a trip arrive while the breaker
+// is open: they are samples only, whether the cooldown is still running or
+// has already elapsed. Open-state resolution belongs exclusively to
+// canaries admitted via Acquire — an un-admitted stale outcome must
+// neither close nor re-trip the breaker.
 func TestBreakerLateRecordWhileOpenIsIgnored(t *testing.T) {
 	b := NewBreaker(Policy{
 		ErrorThreshold: 0.5,
@@ -293,19 +296,15 @@ func TestBreakerLateRecordWhileOpenIsIgnored(t *testing.T) {
 	if b.State() != StateOpen {
 		t.Fatalf("late success must not close an open breaker; got %s", b.State())
 	}
-}
 
-// Callers that gate on Allow alone (no Acquire) send once the cooldown has
-// elapsed; their outcome must still resolve the breaker.
-func TestBreakerOpenRecordAfterCooldownResolves(t *testing.T) {
+	// After the cooldown elapsed: still samples only.
 	pol := Policy{
 		ErrorThreshold: 0.5,
 		MinRequests:    4,
 		OpenDuration:   10 * time.Millisecond,
 		WindowSize:     8,
 	}
-
-	b := NewBreaker(pol)
+	b = NewBreaker(pol)
 	for i := 0; i < 4; i++ {
 		b.Record(false)
 	}
@@ -313,21 +312,25 @@ func TestBreakerOpenRecordAfterCooldownResolves(t *testing.T) {
 	if !b.Allow() {
 		t.Fatal("cooldown should have elapsed")
 	}
-	b.Record(true) // Allow-gated caller's success, no Acquire
-	if b.State() != StateClosed {
-		t.Fatalf("post-cooldown success should close, got %s", b.State())
+	b.Record(true)
+	if b.State() != StateOpen {
+		t.Fatalf("un-admitted post-cooldown success must not close; got %s", b.State())
+	}
+	b.Record(false)
+	if b.State() != StateOpen {
+		t.Fatalf("un-admitted post-cooldown failure must keep state open; got %s", b.State())
+	}
+	if got, want := b.openedBackoff.Load(), pol.OpenDuration.Nanoseconds(); got != want {
+		t.Errorf("un-admitted post-cooldown failure must not re-trip/double the cooldown: got %dns want %dns", got, want)
 	}
 
-	b = NewBreaker(pol)
-	for i := 0; i < 4; i++ {
-		b.Record(false)
+	// The breaker still recovers through the front door: an Acquired
+	// canary resolves it.
+	if !b.Acquire() {
+		t.Fatal("canary should be admitted after the cooldown")
 	}
-	time.Sleep(15 * time.Millisecond)
-	b.Record(false) // Allow-gated caller's failure, no Acquire
-	if b.State() != StateOpen {
-		t.Fatalf("post-cooldown failure should re-trip, got %s", b.State())
-	}
-	if got, want := b.openedBackoff.Load(), (20 * time.Millisecond).Nanoseconds(); got != want {
-		t.Errorf("post-cooldown failure should double the cooldown: got %dns want %dns", got, want)
+	b.Record(true)
+	if b.State() != StateClosed {
+		t.Fatalf("canary success should close; got %s", b.State())
 	}
 }
