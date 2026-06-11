@@ -6,13 +6,21 @@
 //	open → half-open    on Acquire after open_duration (caller becomes the canary)
 //	half-open → closed  on a successful canary
 //	half-open → open    on a failed canary (with exponential backoff)
+//	open → closed       on a success recorded after open_duration — legacy
+//	                    Allow→Record callers (the gRPC/chainstream directors);
+//	                    goes away once the directors migrate to Acquire
+//	open → open         on a failure recorded after open_duration: re-trip
+//	                    with doubled backoff — same legacy-caller path
 //
 // The API is split between filtering and admission. Allow is read-only —
 // the selector calls it to filter candidates and it never transitions
 // state or consumes anything. Acquire admits one request: it performs the
 // open→half-open transition once the cooldown has elapsed and claims the
 // single canary slot, so at most one canary is in flight per half-open
-// period. Record resolves outcomes and releases the slot.
+// period. Record resolves outcomes and releases the slot. Release abandons
+// an admission without an outcome — no sample, no transition — freeing a
+// claimed canary slot for requests that ended without indicting anyone
+// (e.g. the client vanished mid-flight).
 package circuit
 
 import (
@@ -132,6 +140,23 @@ func (b *Breaker) Acquire() bool {
 		return true
 	}
 	return true // closed concurrently with the fast-path load
+}
+
+// Release abandons an admission obtained via Acquire without recording an
+// outcome: no sample is added and no state transition happens; a claimed
+// half-open canary slot is freed so another caller may probe. No-op when
+// the breaker is not half-open or the slot is unclaimed. For requests
+// whose outcome says nothing about the backend — e.g. the client vanished
+// mid-flight, or a hedge/broadcast loser cancelled after a winner.
+func (b *Breaker) Release() {
+	if State(b.state.Load()) == StateClosed {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if State(b.state.Load()) == StateHalfOpen {
+		b.canary.Store(false)
+	}
 }
 
 // Record reports the outcome of a request. Failures may trip the breaker;

@@ -1,6 +1,9 @@
 package forwarder
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -46,6 +49,43 @@ func TestBroadcastSkipsHalfOpenWithClaimedCanary(t *testing.T) {
 	}
 	if hits.Load() != 0 {
 		t.Errorf("no request should be dispatched past a claimed canary slot; hits=%d", hits.Load())
+	}
+}
+
+// A loser cancelled after a winner says nothing about its backend: its
+// admission must be released, not recorded as a circuit failure — recording
+// would re-trip a recovering half-open backend and double its backoff.
+func TestDrainResultsReleasesCancelledLoser(t *testing.T) {
+	cm := circuit.NewManager(circuit.Policy{
+		ErrorThreshold: 0.5,
+		MinRequests:    2,
+		OpenDuration:   10 * time.Millisecond,
+	})
+	cm.Record("loser", types.ProtoRPC, false)
+	cm.Record("loser", types.ProtoRPC, false) // tripped
+	time.Sleep(15 * time.Millisecond)         // cooldown elapses
+	if !cm.Acquire("loser", types.ProtoRPC) {
+		t.Fatal("test setup: loser should be admitted as the canary")
+	}
+
+	fwd := newForwarderWithCircuit(stubSelector{}, cm, 3)
+	resCh := make(chan broadcastResult, 2)
+	resCh <- broadcastResult{backend: "loser", err: fmt.Errorf("Post %q: %w", "http://loser", context.Canceled)}
+	resCh <- broadcastResult{backend: "dead", err: errors.New("connection refused")}
+	fwd.drainResults(resCh, 2, types.ProtoRPC)
+
+	if st := cm.State("loser", types.ProtoRPC); st != circuit.StateHalfOpen {
+		t.Errorf("cancelled loser must not resolve the breaker; state=%s", st)
+	}
+	if !cm.Acquire("loser", types.ProtoRPC) {
+		t.Error("cancelled loser's canary slot must be free again")
+	}
+	if st := cm.State("dead", types.ProtoRPC); st != circuit.StateClosed {
+		t.Errorf("genuine failures must still be recorded; one failure must not trip (MinRequests=2); state=%s", st)
+	}
+	cm.Record("dead", types.ProtoRPC, false)
+	if st := cm.State("dead", types.ProtoRPC); st != circuit.StateOpen {
+		t.Errorf("drain must have recorded the genuine failure: a second failure should trip; state=%s", st)
 	}
 }
 

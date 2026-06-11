@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"sync"
 	"time"
 
 	"github.com/decentrio/stitch/internal/backend"
@@ -160,15 +159,23 @@ func (f *HTTP) broadcastOne(ctx context.Context, orig *http.Request, ep, backend
 	return out
 }
 
-// drainResults consumes the remaining N results from resCh and records
-// their outcomes against the circuit breaker. Called in a goroutine
-// after a winner has already been declared.
+// drainResults consumes the remaining N results from resCh and resolves
+// their admissions against the circuit breaker. Called in a goroutine
+// after a winner has already been declared. A loser cancelled by the
+// winner's cancel says nothing about its backend: its admission is
+// released, not recorded — recording would re-trip a recovering backend
+// and double its backoff. Legs that never dispatched have no admission to
+// resolve.
 func (f *HTTP) drainResults(resCh <-chan broadcastResult, n int, p types.Protocol) {
 	for i := 0; i < n; i++ {
 		res := <-resCh
-		if res.err != nil || (res.resp != nil && res.resp.StatusCode >= 500) {
+		switch {
+		case errors.Is(res.err, errHedgeLegSkipped):
+		case errors.Is(res.err, context.Canceled):
+			f.circuit.Release(res.backend, p)
+		case res.err != nil || (res.resp != nil && res.resp.StatusCode >= 500):
 			f.circuit.Record(res.backend, p, false)
-		} else {
+		default:
 			f.circuit.Record(res.backend, p, true)
 		}
 	}
@@ -191,7 +198,3 @@ func pickErrReport(failures []broadcastResult) string {
 	}
 	return "all upstream attempts failed"
 }
-
-// Compile-time anchor; keeps the sync import used if drainResults is
-// future-elaborated to track wait groups.
-var _ = sync.Mutex{}

@@ -148,6 +148,19 @@ func (f *HTTP) Forward(w http.ResponseWriter, r *http.Request, key types.RouteKe
 
 		if err != nil {
 			cancel()
+			if r.Context().Err() != nil {
+				// The client vanished mid-attempt: the error indicts
+				// nobody. Recording would debit an innocent backend;
+				// skipping the resolution entirely would strand a claimed
+				// half-open canary slot — so release the admission.
+				f.circuit.Release(b.Name, key.Protocol)
+				log.FromCtx(r.Context()).Debug("client gone mid-attempt; abandoning forward",
+					"backend", b.Name,
+					"protocol", string(key.Protocol),
+					"attempt", attempts,
+				)
+				return
+			}
 			lastErr = err
 			f.circuit.Record(b.Name, key.Protocol, false)
 			metrics.FailoverAttempts.WithLabelValues(b.Name, "next", classifyErr(err)).Inc()
@@ -184,9 +197,12 @@ func (f *HTTP) Forward(w http.ResponseWriter, r *http.Request, key types.RouteKe
 		if body.err != nil {
 			// Upstream died mid-body. Headers (and part of the body) are
 			// already written, so the response cannot be salvaged — debit
-			// the breaker and stop.
+			// the breaker and stop. The request still terminated through
+			// this backend: count it in the primary traffic metrics.
 			f.circuit.Record(b.Name, key.Protocol, false)
 			metrics.RelayTruncated.WithLabelValues(b.Name, string(key.Protocol)).Inc()
+			metrics.RequestsTotal.WithLabelValues(string(key.Protocol), key.Class.String(), b.Name, statusBucket(resp.StatusCode)).Inc()
+			metrics.RequestDuration.WithLabelValues(string(key.Protocol), key.Class.String(), b.Name).Observe(dur.Seconds())
 			log.FromCtx(r.Context()).Warn("upstream body truncated mid-relay",
 				"backend", b.Name,
 				"protocol", string(key.Protocol),
@@ -197,8 +213,11 @@ func (f *HTTP) Forward(w http.ResponseWriter, r *http.Request, key types.RouteKe
 		}
 		if copyErr != nil {
 			// Only the client-side write failed; the upstream served fine.
-			// Don't blame the backend.
+			// Don't blame the backend — but the request still terminated
+			// through it, so count it in the primary traffic metrics.
 			f.circuit.Record(b.Name, key.Protocol, upstreamOK)
+			metrics.RequestsTotal.WithLabelValues(string(key.Protocol), key.Class.String(), b.Name, statusBucket(resp.StatusCode)).Inc()
+			metrics.RequestDuration.WithLabelValues(string(key.Protocol), key.Class.String(), b.Name).Observe(dur.Seconds())
 			log.FromCtx(r.Context()).Debug("client write failed mid-relay",
 				"backend", b.Name,
 				"err", copyErr.Error(),

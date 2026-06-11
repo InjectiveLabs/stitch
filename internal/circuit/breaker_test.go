@@ -191,12 +191,63 @@ func TestBreakerCanaryReleasedOnResolve(t *testing.T) {
 	if b.canary.Load() {
 		t.Fatal("slot should be released on failure")
 	}
-	if b.Acquire() {
-		t.Fatal("re-opened breaker should reject before the new cooldown elapses")
+	// Assert the doubled cooldown by value, not with a wall-clock Acquire
+	// probe: on a loaded machine the 20ms window may already have elapsed.
+	if got, want := b.openedBackoff.Load(), (20 * time.Millisecond).Nanoseconds(); got != want {
+		t.Errorf("failed canary should double the cooldown: got %dns want %dns", got, want)
 	}
 	time.Sleep(25 * time.Millisecond) // doubled cooldown = 20ms
 	if !b.Acquire() {
 		t.Fatal("next canary should be admitted after the doubled cooldown")
+	}
+}
+
+// Release abandons an admission without an outcome: the canary slot is
+// freed, the state stays half-open, and no sample is recorded.
+func TestBreakerReleaseFreesCanaryWithoutSample(t *testing.T) {
+	b := NewBreaker(Policy{
+		ErrorThreshold: 0.5,
+		MinRequests:    4,
+		OpenDuration:   10 * time.Millisecond,
+		WindowSize:     8,
+	})
+	for i := 0; i < 4; i++ {
+		b.Record(false)
+	}
+	time.Sleep(15 * time.Millisecond)
+	if !b.Acquire() {
+		t.Fatal("canary should be admitted after cooldown")
+	}
+	if b.State() != StateHalfOpen {
+		t.Fatalf("expected half_open, got %s", b.State())
+	}
+
+	countBefore := b.count
+	b.Release()
+	if b.State() != StateHalfOpen {
+		t.Fatalf("Release must not transition state; got %s", b.State())
+	}
+	if b.canary.Load() {
+		t.Fatal("Release must free the canary slot")
+	}
+	if b.count != countBefore {
+		t.Fatalf("Release must not record a sample: count %d → %d", countBefore, b.count)
+	}
+	if !b.Acquire() {
+		t.Fatal("released slot should be claimable again")
+	}
+	b.Record(true)
+	if b.State() != StateClosed {
+		t.Fatalf("expected closed after the re-acquired canary succeeds, got %s", b.State())
+	}
+
+	// No-op on a closed breaker with no claimed slot.
+	b.Release()
+	if b.State() != StateClosed {
+		t.Fatalf("Release on closed must be a no-op; got %s", b.State())
+	}
+	if !b.Acquire() {
+		t.Fatal("closed breaker should still admit freely")
 	}
 }
 

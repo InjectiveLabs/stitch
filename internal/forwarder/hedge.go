@@ -7,15 +7,29 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/decentrio/stitch/internal/backend"
 	"github.com/decentrio/stitch/internal/log"
 	"github.com/decentrio/stitch/internal/metrics"
 	"github.com/decentrio/stitch/internal/types"
 )
 
-// Hedge dispatches the request to the top selector candidate immediately
-// and to the second candidate after policy.HedgeAfter. The first
+// errHedgeLegSkipped marks a hedge leg that was never dispatched — breaker
+// refused admission, no candidate left, or the race ended first. Nothing
+// was acquired for such a leg, so its result must neither Record nor
+// Release.
+var errHedgeLegSkipped = errors.New("hedge leg not dispatched")
+
+// Hedge dispatches the request to the first acquirable candidate
+// immediately and to a second candidate after policy.HedgeAfter. The first
 // successful response wins; the loser is drained in the background to
 // keep the circuit-breaker accounting honest.
+//
+// Each leg is admitted via Acquire immediately before it fires: the
+// primary at dispatch (falling back through the candidate list; with no
+// acquirable primary, Forward owns the exhaustion path), the secondary at
+// timer-fire (an unacquirable secondary simply never fires and the
+// primary continues alone). Every dispatched leg resolves its admission
+// with exactly one Record or Release.
 //
 // Falls back to the regular Forward path when fewer than 2 candidates
 // are available — there's no second backend to hedge against.
@@ -40,40 +54,68 @@ func (f *HTTP) Hedge(w http.ResponseWriter, r *http.Request, key types.RouteKey)
 		}
 	}
 
+	// Admit the primary: breakers may have tripped between selection and
+	// now. Candidates without an endpoint or admission are skipped.
+	var (
+		primary   *backend.Backend
+		primaryEp string
+		next      int
+	)
+	for i, b := range candidates {
+		ep := b.Endpoint(key.Protocol)
+		if ep == "" {
+			continue
+		}
+		if !f.circuit.Acquire(b.Name, key.Protocol) {
+			continue
+		}
+		primary, primaryEp, next = b, ep, i+1
+		break
+	}
+	if primary == nil {
+		f.Forward(w, r, key)
+		return
+	}
+
+	// Secondary candidate; its admission is checked at timer-fire.
+	var (
+		secondary   *backend.Backend
+		secondaryEp string
+	)
+	for _, b := range candidates[next:] {
+		if ep := b.Endpoint(key.Protocol); ep != "" {
+			secondary, secondaryEp = b, ep
+			break
+		}
+	}
+
 	ctx, cancel := context.WithTimeout(r.Context(), f.policy.PerAttemptTimeout)
 	defer cancel()
 
 	resCh := make(chan broadcastResult, 2)
-	primary := candidates[0]
-	secondary := candidates[1]
 
-	// Primary fires immediately.
+	// Primary fires immediately; its admission is already held.
 	go func() {
-		ep := primary.Endpoint(key.Protocol)
-		if ep == "" {
-			resCh <- broadcastResult{backend: primary.Name, err: errors.New("primary has no endpoint for protocol")}
-			return
-		}
-		resCh <- f.broadcastOne(ctx, r, ep, primary.Name, bodyBytes)
+		resCh <- f.broadcastOne(ctx, r, primaryEp, primary.Name, bodyBytes)
 	}()
 
-	// Secondary fires after hedgeAfter, unless ctx is cancelled first.
+	// Secondary fires after HedgeAfter, unless the race ends first or the
+	// breaker refuses admission.
 	go func() {
 		select {
 		case <-time.After(f.policy.HedgeAfter):
 		case <-ctx.Done():
-			resCh <- broadcastResult{backend: secondary.Name, err: ctx.Err()}
+			resCh <- broadcastResult{err: errHedgeLegSkipped}
 			return
 		}
-		ep := secondary.Endpoint(key.Protocol)
-		if ep == "" {
-			resCh <- broadcastResult{backend: secondary.Name, err: errors.New("secondary has no endpoint for protocol")}
+		if secondary == nil || !f.circuit.Acquire(secondary.Name, key.Protocol) {
+			resCh <- broadcastResult{err: errHedgeLegSkipped}
 			return
 		}
-		resCh <- f.broadcastOne(ctx, r, ep, secondary.Name, bodyBytes)
+		resCh <- f.broadcastOne(ctx, r, secondaryEp, secondary.Name, bodyBytes)
 	}()
 
-	// Wait for first success (or both failures).
+	// Wait for first success (or both legs resolved).
 	failures := []broadcastResult{}
 	for i := 0; i < 2; i++ {
 		res := <-resCh
@@ -81,28 +123,40 @@ func (f *HTTP) Hedge(w http.ResponseWriter, r *http.Request, key types.RouteKey)
 			cancel()
 			f.circuit.Record(res.backend, key.Protocol, true)
 			idx := "0"
-			if res.backend == secondary.Name {
+			if secondary != nil && res.backend == secondary.Name {
 				idx = "1"
 			}
 			metrics.HedgeWins.WithLabelValues(key.Method, idx).Inc()
 			copyHeaders(w.Header(), res.resp.Header)
 			w.WriteHeader(res.resp.StatusCode)
 			_, _ = w.Write(res.body)
-			// Drain the loser asynchronously so its outcome credits the circuit.
+			// Drain the loser asynchronously so its admission is resolved.
 			go f.drainResults(resCh, 1-i, key.Protocol)
 			return
 		}
+		if errors.Is(res.err, errHedgeLegSkipped) {
+			// Never dispatched: no admission to resolve, nothing to report.
+			continue
+		}
 		failures = append(failures, res)
-		if res.err == nil || !errors.Is(res.err, context.Canceled) {
+		if errors.Is(res.err, context.Canceled) {
+			// Cancelled mid-flight: the outcome says nothing about the
+			// backend, so free the admission claimed at dispatch.
+			f.circuit.Release(res.backend, key.Protocol)
+		} else {
 			f.circuit.Record(res.backend, key.Protocol, false)
 		}
 	}
 
+	secondaryName := "-"
+	if secondary != nil {
+		secondaryName = secondary.Name
+	}
 	log.FromCtx(r.Context()).Error("hedge: both candidates failed",
 		"protocol", string(key.Protocol),
 		"method", key.Method,
 		"primary", primary.Name,
-		"secondary", secondary.Name,
+		"secondary", secondaryName,
 		"err", pickErrReport(failures),
 	)
 	writeJSONError(w, http.StatusBadGateway, pickErrReport(failures))

@@ -49,6 +49,16 @@ func (m *Manager) Acquire(backend string, p types.Protocol) bool {
 	return ok
 }
 
+// Release abandons an admission obtained via Acquire for (backend,
+// protocol) without recording an outcome: it frees a claimed half-open
+// canary slot and never adds a sample or transitions state. Updates the
+// gauge.
+func (m *Manager) Release(backend string, p types.Protocol) {
+	b := m.get(backend, p)
+	b.Release()
+	metrics.CircuitState.WithLabelValues(backend, string(p)).Set(float64(b.State()))
+}
+
 // Record reports an outcome; updates the gauge.
 func (m *Manager) Record(backend string, p types.Protocol, success bool) {
 	b := m.get(backend, p)

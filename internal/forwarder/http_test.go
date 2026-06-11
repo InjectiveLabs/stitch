@@ -237,9 +237,39 @@ func TestForwardSkipsTrippedCandidateWithoutConsumingAttempt(t *testing.T) {
 	}
 }
 
+// requestDurationCount returns the observation count of the RequestDuration
+// histogram series matching the given labels (0 when the series does not
+// exist yet).
+func requestDurationCount(t *testing.T, protocol, class, backendName string) uint64 {
+	t.Helper()
+	mfs, err := metrics.Registry().Gather()
+	if err != nil {
+		t.Fatalf("gather: %v", err)
+	}
+	want := map[string]string{"protocol": protocol, "method_class": class, "backend": backendName}
+	for _, mf := range mfs {
+		if mf.GetName() != "stitch_request_duration_seconds" {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			matched := 0
+			for _, lp := range m.GetLabel() {
+				if want[lp.GetName()] == lp.GetValue() {
+					matched++
+				}
+			}
+			if matched == len(want) {
+				return m.GetHistogram().GetSampleCount()
+			}
+		}
+	}
+	return 0
+}
+
 // An upstream that dies mid-body must be debited as a circuit failure and
 // counted by stitch_relay_truncated_total, even though headers (and part of
-// the body) already reached the client.
+// the body) already reached the client. The request still terminated through
+// this backend, so it must show up in the primary traffic metrics too.
 func TestForwardTruncatedUpstreamRecordsFailure(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Length", "1000")
@@ -252,6 +282,8 @@ func TestForwardTruncatedUpstreamRecordsFailure(t *testing.T) {
 	fwd := newForwarderWithCircuit(stubSelector{cands: []*backend.Backend{mkBackend("trunc", upstream.URL)}}, cm, 1)
 
 	before := testutil.ToFloat64(metrics.RelayTruncated.WithLabelValues("trunc", string(types.ProtoRPC)))
+	reqBefore := testutil.ToFloat64(metrics.RequestsTotal.WithLabelValues(string(types.ProtoRPC), types.ClassLatest.String(), "trunc", "2xx"))
+	durBefore := requestDurationCount(t, string(types.ProtoRPC), types.ClassLatest.String(), "trunc")
 	for i := 0; i < 2; i++ {
 		rec := httptest.NewRecorder()
 		r := httptest.NewRequest(http.MethodGet, "/status", nil)
@@ -263,6 +295,12 @@ func TestForwardTruncatedUpstreamRecordsFailure(t *testing.T) {
 
 	if got := testutil.ToFloat64(metrics.RelayTruncated.WithLabelValues("trunc", string(types.ProtoRPC))) - before; got != 2 {
 		t.Errorf("RelayTruncated delta: got %v, want 2", got)
+	}
+	if got := testutil.ToFloat64(metrics.RequestsTotal.WithLabelValues(string(types.ProtoRPC), types.ClassLatest.String(), "trunc", "2xx")) - reqBefore; got != 2 {
+		t.Errorf("RequestsTotal delta: got %v, want 2 (truncated relays must not vanish from traffic metrics)", got)
+	}
+	if got := requestDurationCount(t, string(types.ProtoRPC), types.ClassLatest.String(), "trunc") - durBefore; got != 2 {
+		t.Errorf("RequestDuration observation delta: got %v, want 2", got)
 	}
 	if st := cm.State("trunc", types.ProtoRPC); st != circuit.StateOpen {
 		t.Errorf("two truncated bodies must trip the breaker; state=%s", st)
@@ -288,6 +326,8 @@ func TestForwardClientWriteFailureDoesNotBlameBackend(t *testing.T) {
 	fwd := newForwarderWithCircuit(stubSelector{cands: []*backend.Backend{mkBackend("cw", upstream.URL)}}, cm, 1)
 
 	before := testutil.ToFloat64(metrics.RelayTruncated.WithLabelValues("cw", string(types.ProtoRPC)))
+	reqBefore := testutil.ToFloat64(metrics.RequestsTotal.WithLabelValues(string(types.ProtoRPC), types.ClassLatest.String(), "cw", "2xx"))
+	durBefore := requestDurationCount(t, string(types.ProtoRPC), types.ClassLatest.String(), "cw")
 	for i := 0; i < 2; i++ {
 		rec := httptest.NewRecorder()
 		r := httptest.NewRequest(http.MethodGet, "/status", nil)
@@ -299,6 +339,12 @@ func TestForwardClientWriteFailureDoesNotBlameBackend(t *testing.T) {
 	}
 	if got := testutil.ToFloat64(metrics.RelayTruncated.WithLabelValues("cw", string(types.ProtoRPC))) - before; got != 0 {
 		t.Errorf("client write failures must not count as truncated relays; delta=%v", got)
+	}
+	if got := testutil.ToFloat64(metrics.RequestsTotal.WithLabelValues(string(types.ProtoRPC), types.ClassLatest.String(), "cw", "2xx")) - reqBefore; got != 2 {
+		t.Errorf("RequestsTotal delta: got %v, want 2 (client-write failures must not vanish from traffic metrics)", got)
+	}
+	if got := requestDurationCount(t, string(types.ProtoRPC), types.ClassLatest.String(), "cw") - durBefore; got != 2 {
+		t.Errorf("RequestDuration observation delta: got %v, want 2", got)
 	}
 }
 
@@ -333,6 +379,89 @@ func TestForward500PassThroughRecordsCircuitFailure(t *testing.T) {
 	}
 	if st := cm.State("ise", types.ProtoRPC); st != circuit.StateOpen {
 		t.Errorf("two 500s must trip the breaker; state=%s", st)
+	}
+}
+
+// A client that vanishes while an attempt is in flight indicts nobody: no
+// circuit failure, no failover counter, no further candidates tried.
+func TestForwardClientGoneMidAttemptNoRecord(t *testing.T) {
+	var hits, nextHits atomic.Int32
+	clientCancel := atomic.Pointer[context.CancelFunc]{}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		(*clientCancel.Load())() // client vanishes mid-attempt
+		<-r.Context().Done()     // hold until the proxy abandons the attempt
+	}))
+	defer upstream.Close()
+	next := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		nextHits.Add(1)
+		w.WriteHeader(200)
+	}))
+	defer next.Close()
+
+	cm := newTestCircuit()
+	fwd := newForwarderWithCircuit(stubSelector{cands: []*backend.Backend{
+		mkBackend("mg", upstream.URL),
+		mkBackend("mg-next", next.URL),
+	}}, cm, 3)
+
+	failoverBefore := testutil.ToFloat64(metrics.FailoverAttempts.WithLabelValues("mg", "next", "cancelled"))
+	for i := 0; i < 2; i++ {
+		rec := httptest.NewRecorder()
+		r := httptest.NewRequest(http.MethodGet, "/status", nil)
+		ctx, cancel := context.WithCancel(r.Context())
+		clientCancel.Store(&cancel)
+		fwd.Forward(rec, r.WithContext(ctx), types.RouteKey{Protocol: types.ProtoRPC, Method: "status", Class: types.ClassLatest, Idempotent: true})
+		if rec.Body.Len() != 0 {
+			t.Errorf("nothing should be written for a gone client; got %q", rec.Body.String())
+		}
+	}
+
+	if st := cm.State("mg", types.ProtoRPC); st != circuit.StateClosed {
+		t.Errorf("client-gone attempts must not be recorded as circuit failures; state=%s", st)
+	}
+	if got := testutil.ToFloat64(metrics.FailoverAttempts.WithLabelValues("mg", "next", "cancelled")) - failoverBefore; got != 0 {
+		t.Errorf("client-gone attempts must not count as failovers; delta=%v", got)
+	}
+	if nextHits.Load() != 0 {
+		t.Errorf("no further candidate may be tried after the client is gone; hits=%d", nextHits.Load())
+	}
+	if hits.Load() != 2 {
+		t.Errorf("first candidate should have been attempted twice; hits=%d", hits.Load())
+	}
+}
+
+// A client-gone attempt that was admitted as a half-open canary must release
+// the slot: state stays half-open and the next caller can claim it.
+func TestForwardClientGoneMidAttemptReleasesCanary(t *testing.T) {
+	clientCancel := atomic.Pointer[context.CancelFunc]{}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		(*clientCancel.Load())()
+		<-r.Context().Done()
+	}))
+	defer upstream.Close()
+
+	cm := circuit.NewManager(circuit.Policy{
+		ErrorThreshold: 0.5,
+		MinRequests:    2,
+		OpenDuration:   50 * time.Millisecond,
+	})
+	cm.Record("cg", types.ProtoRPC, false)
+	cm.Record("cg", types.ProtoRPC, false) // tripped
+	time.Sleep(60 * time.Millisecond)      // cooldown elapses
+
+	fwd := newForwarderWithCircuit(stubSelector{cands: []*backend.Backend{mkBackend("cg", upstream.URL)}}, cm, 3)
+	rec := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodGet, "/status", nil)
+	ctx, cancel := context.WithCancel(r.Context())
+	clientCancel.Store(&cancel)
+	fwd.Forward(rec, r.WithContext(ctx), types.RouteKey{Protocol: types.ProtoRPC, Method: "status", Class: types.ClassLatest, Idempotent: true})
+
+	if st := cm.State("cg", types.ProtoRPC); st != circuit.StateHalfOpen {
+		t.Errorf("client-gone canary must not resolve the breaker; state=%s", st)
+	}
+	if !cm.Acquire("cg", types.ProtoRPC) {
+		t.Error("canary slot must be free again after a client-gone release")
 	}
 }
 
