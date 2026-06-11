@@ -143,6 +143,137 @@ func TestRangeSelectorEmptyWhenNoEndpoint(t *testing.T) {
 	}
 }
 
+// evmStreamProtocols are the request protocols whose health rides the
+// shared chain-head signal (see healthProtocols).
+var evmStreamProtocols = []types.Protocol{
+	types.ProtoEthRPC, types.ProtoEthWS, types.ProtoChainStream,
+}
+
+// mkEVMOnly builds a registry with a single backend that exposes only
+// EVM/stream endpoints — no CometBFT rpc — so the RPC prober never writes
+// a ProtoRPC snapshot for it. The only possible health witness is the
+// ProtoEthWS snapshot written by the eth_ws head prober.
+func mkEVMOnly(t *testing.T) (*backend.Registry, *health.Registry, *circuit.Manager) {
+	t.Helper()
+	bs := []*backend.Backend{{
+		Name:     "evm",
+		Coverage: backend.Coverage{Kind: backend.CovArchive},
+		Weight:   100,
+		Endpoints: map[types.Protocol]string{
+			types.ProtoEthRPC:      "http://evm:8545",
+			types.ProtoEthWS:       "ws://evm:8546",
+			types.ProtoChainStream: "evm:9900",
+		},
+	}}
+	reg := backend.NewRegistry(bs)
+	h := health.NewRegistry()
+	cm := circuit.NewManager(circuit.Policy{
+		ErrorThreshold: 0.5,
+		MinRequests:    4,
+		OpenDuration:   100 * time.Millisecond,
+	})
+	return reg, h, cm
+}
+
+// TestRangeSelectorEVMOnlyGatedByEthWSSnapshot: with no rpc endpoint there
+// is no ProtoRPC snapshot, so the eth_ws prober's ProtoEthWS snapshot must
+// decide eligibility for all EVM/stream protocols.
+func TestRangeSelectorEVMOnlyGatedByEthWSSnapshot(t *testing.T) {
+	cases := []struct {
+		name    string
+		healthy bool
+		include bool
+	}{
+		{"unhealthy ws snapshot excludes", false, false},
+		{"healthy ws snapshot includes", true, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, proto := range evmStreamProtocols {
+				reg, h, cm := mkEVMOnly(t)
+				h.Update(health.Snapshot{
+					Backend:      "evm",
+					Protocol:     types.ProtoEthWS,
+					Healthy:      tc.healthy,
+					LatestHeight: 100000,
+				})
+				// maxLag > 0 on purpose: WS snapshots carry no Lag (the
+				// RPC prober owns lag), so a healthy WS witness must pass
+				// the lag gate with its zero Lag.
+				s := NewRangeSelector(reg, h, cm, 100)
+				cands := s.Candidates(types.RouteKey{Protocol: proto, Class: types.ClassLatest})
+				if got := len(cands) == 1; got != tc.include {
+					t.Errorf("protocol %s: included=%v, want %v", proto, got, tc.include)
+				}
+			}
+		})
+	}
+}
+
+// TestRangeSelectorEVMOnlyNoSnapshotsOptimistic: a backend no prober covers
+// at all (no rpc endpoint to poll, no WS head seen yet) stays routable.
+func TestRangeSelectorEVMOnlyNoSnapshotsOptimistic(t *testing.T) {
+	for _, proto := range evmStreamProtocols {
+		reg, h, cm := mkEVMOnly(t)
+		s := NewRangeSelector(reg, h, cm, 100)
+		cands := s.Candidates(types.RouteKey{Protocol: proto, Class: types.ClassLatest})
+		if len(cands) != 1 {
+			t.Errorf("protocol %s: expected optimistic include, got %d candidates", proto, len(cands))
+		}
+	}
+}
+
+// TestRangeSelectorMappedSnapshotBeatsNative: when both ProtoRPC and
+// ProtoEthWS snapshots exist, the RPC prober's verdict wins — it owns the
+// authoritative height/lag signal; the WS snapshot is only the fallback
+// witness for backends the RPC prober cannot see.
+func TestRangeSelectorMappedSnapshotBeatsNative(t *testing.T) {
+	cases := []struct {
+		name    string
+		rpcOK   bool
+		wsOK    bool
+		include bool
+	}{
+		{"healthy rpc beats unhealthy ws", true, false, true},
+		{"unhealthy rpc beats healthy ws", false, true, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, proto := range evmStreamProtocols {
+				bs := []*backend.Backend{{
+					Name:     "dual",
+					Coverage: backend.Coverage{Kind: backend.CovArchive},
+					Weight:   100,
+					Endpoints: map[types.Protocol]string{
+						types.ProtoRPC:         "http://dual:26657",
+						types.ProtoEthRPC:      "http://dual:8545",
+						types.ProtoEthWS:       "ws://dual:8546",
+						types.ProtoChainStream: "dual:9900",
+					},
+				}}
+				reg := backend.NewRegistry(bs)
+				h := health.NewRegistry()
+				h.Update(health.Snapshot{
+					Backend: "dual", Protocol: types.ProtoRPC,
+					Healthy: tc.rpcOK, LatestHeight: 100000,
+				})
+				h.Update(health.Snapshot{
+					Backend: "dual", Protocol: types.ProtoEthWS,
+					Healthy: tc.wsOK, LatestHeight: 100000,
+				})
+				cm := circuit.NewManager(circuit.Policy{
+					ErrorThreshold: 0.5, MinRequests: 4, OpenDuration: 100 * time.Millisecond,
+				})
+				s := NewRangeSelector(reg, h, cm, 0)
+				cands := s.Candidates(types.RouteKey{Protocol: proto, Class: types.ClassLatest})
+				if got := len(cands) == 1; got != tc.include {
+					t.Errorf("protocol %s: included=%v, want %v", proto, got, tc.include)
+				}
+			}
+		})
+	}
+}
+
 // TestRangeSelectorHeightFloor exercises the selector floor: when the
 // queried height exceeds MaxHead (stale probe / brief WS-disconnect window),
 // any backend whose coverage upper bound rides head (pruned / open /

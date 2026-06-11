@@ -35,6 +35,10 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Fixed
 
+- EVM-only backends (no CometBFT `rpc` endpoint) are now health-gated via
+  their `eth_ws` head stream; a dropped stream marks the backend unhealthy
+  for EVM/stream routing until it reconnects. Previously such backends were
+  optimistically healthy forever.
 - Graceful shutdown returns as soon as every listener has drained instead of
   always blocking for the full `--shutdown-grace` window; per-server drain
   timings are logged, and servers still draining at the deadline are named.

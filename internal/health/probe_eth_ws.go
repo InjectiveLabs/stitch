@@ -26,10 +26,12 @@ import (
 // atomic MaxHead bumps automatically, giving the selector near-real-time
 // head with no API changes elsewhere.
 //
-// Health for EVM HTTP routing continues to be sourced from the CometBFT
-// /status poll via selector.healthProtocol(ProtoEthRPC) -> ProtoRPC.
-// A dropped WS connection therefore degrades freshness only, not
-// eligibility.
+// Health for EVM routing prefers the CometBFT /status poll (the ProtoRPC
+// snapshot) when the backend has an rpc endpoint; for EVM-only backends
+// the selector falls back to this prober's ProtoEthWS snapshot (see
+// selector.healthProtocols). A dropped stream therefore degrades only
+// freshness for dual-stack backends, but marks EVM-only backends
+// unhealthy until the stream reconnects.
 type EthWSProber struct {
 	registry *backend.Registry
 	health   *Registry
@@ -166,8 +168,28 @@ func (p *EthWSProber) trackOne(ctx context.Context, name, ep string) {
 			// just-deleted BackendHealth child below.
 			return
 		}
-		// Stream dropped — mark unhealthy so operators see it in dashboards.
-		metrics.BackendHealth.WithLabelValues(name, string(types.ProtoEthWS)).Set(0)
+		// Stream dropped — mark unhealthy for routing, not just dashboards:
+		// write an unhealthy ProtoEthWS snapshot so selectors that fall back
+		// to the WS witness (EVM-only backends with no CometBFT rpc endpoint)
+		// stop routing here until the stream reconnects and heads flow again
+		// (the per-frame Update in subscribeAndStream flips Healthy back).
+		// Carry the last known height forward — MaxHead is monotonic either
+		// way, but the truthful height keeps the snapshot useful.
+		// Guarded on registry membership like the per-frame publish: after a
+		// hot-reload prune this bookkeeping would resurrect the pruned
+		// snapshot and gauge child in the window before reconcile cancels us.
+		if p.registry.Has(name) {
+			metrics.BackendHealth.WithLabelValues(name, string(types.ProtoEthWS)).Set(0)
+			last, _ := p.health.Get(name, types.ProtoEthWS)
+			p.health.Update(Snapshot{
+				Backend:      name,
+				Protocol:     types.ProtoEthWS,
+				Healthy:      false,
+				LatestHeight: last.LatestHeight,
+				LastError:    errString(err),
+				UpdatedAt:    time.Now(),
+			})
+		}
 		log.L().Warn("eth_ws head stream dropped", "backend", name, "err", errString(err))
 		if time.Since(start) >= p.healthyStreamThreshold {
 			// Stream lasted long enough that we treat it as healthy —

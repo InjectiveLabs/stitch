@@ -12,7 +12,6 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"github.com/decentrio/stitch/internal/backend"
 	"github.com/decentrio/stitch/internal/log"
 	"github.com/decentrio/stitch/internal/metrics"
 	"github.com/decentrio/stitch/internal/runtime"
@@ -583,6 +582,3 @@ func (s *Session) Backend() string {
 	v, _ := s.upBackend.Load().(string)
 	return v
 }
-
-// for compile-time linkage on backend type.
-var _ = (*backend.Backend)(nil)
