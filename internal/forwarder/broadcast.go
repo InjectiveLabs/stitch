@@ -58,11 +58,14 @@ func (f *HTTP) Broadcast(w http.ResponseWriter, r *http.Request, key types.Route
 	dispatched := 0
 
 	for _, b := range candidates {
-		if !f.circuit.Allow(b.Name, key.Protocol) {
-			continue
-		}
 		ep := b.Endpoint(key.Protocol)
 		if ep == "" {
+			continue
+		}
+		// Acquire, not the read-only Allow: a half-open backend admits at
+		// most one canary, and every dispatched goroutine's outcome is
+		// recorded below, which releases the slot.
+		if !f.circuit.Acquire(b.Name, key.Protocol) {
 			continue
 		}
 		dispatched++

@@ -128,6 +128,14 @@ var (
 		},
 		[]string{"method", "winner_index"},
 	)
+	RelayTruncated = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: Namespace,
+			Name:      "relay_truncated_total",
+			Help:      "Relayed responses whose upstream body failed mid-copy after headers were sent.",
+		},
+		[]string{"backend", "protocol"},
+	)
 	BuildInfo = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Namespace: Namespace,
@@ -157,6 +165,7 @@ func init() {
 		InflightRequests,
 		BroadcastFanout,
 		HedgeWins,
+		RelayTruncated,
 		BuildInfo,
 	)
 	registry.MustRegister(prometheus.NewGoCollector())

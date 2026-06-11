@@ -30,12 +30,23 @@ func (m *Manager) get(backend string, p types.Protocol) *Breaker {
 	return actual.(*Breaker)
 }
 
-// Allow consults the breaker for (backend, protocol) and updates the gauge.
+// Allow consults the breaker for (backend, protocol) read-only — safe for
+// candidate filtering. Updates the gauge.
 func (m *Manager) Allow(backend string, p types.Protocol) bool {
 	b := m.get(backend, p)
 	allowed := b.Allow()
 	metrics.CircuitState.WithLabelValues(backend, string(p)).Set(float64(b.State()))
 	return allowed
+}
+
+// Acquire admits one request to (backend, protocol); callers must Record
+// the outcome so a claimed half-open canary slot is released. Updates the
+// gauge (Acquire can move an open breaker to half-open).
+func (m *Manager) Acquire(backend string, p types.Protocol) bool {
+	b := m.get(backend, p)
+	ok := b.Acquire()
+	metrics.CircuitState.WithLabelValues(backend, string(p)).Set(float64(b.State()))
+	return ok
 }
 
 // Record reports an outcome; updates the gauge.
