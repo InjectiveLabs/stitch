@@ -272,6 +272,91 @@ func TestGRPCPoolEvictsIdle(t *testing.T) {
 	}
 }
 
+// A half-open backend admits exactly one in-flight canary. The first
+// Direct claims it via Acquire; a second Direct arriving before the canary
+// resolves must skip to the next candidate instead of piling onto the
+// probing backend. The legacy read-only Allow gate could not give this
+// guarantee — it filtered, but consumed nothing. ReleaseOutcome (the
+// client-vanished path) must free the slot without resolving the circuit.
+func TestGRPCDirectorHalfOpenAdmitsSingleCanary(t *testing.T) {
+	bs := []*backend.Backend{
+		{
+			Name:      "archive",
+			Coverage:  backend.Coverage{Kind: backend.CovArchive},
+			Weight:    100,
+			Endpoints: map[types.Protocol]string{types.ProtoGRPC: "127.0.0.1:19001"},
+		},
+		{
+			Name:      "shard1",
+			Coverage:  backend.Coverage{Kind: backend.CovBounded, Lower: 1, Upper: 50000},
+			Weight:    100,
+			Endpoints: map[types.Protocol]string{types.ProtoGRPC: "127.0.0.1:19002"},
+		},
+	}
+	reg := backend.NewRegistry(bs)
+	h := healthreg.NewRegistry()
+	for _, bb := range bs {
+		h.Update(healthreg.Snapshot{
+			Backend: bb.Name, Protocol: types.ProtoRPC, Healthy: true, LatestHeight: 100000,
+		})
+		h.Update(healthreg.Snapshot{
+			Backend: bb.Name, Protocol: types.ProtoGRPC, Healthy: true,
+		})
+	}
+	cm := circuit.NewManager(circuit.Policy{
+		ErrorThreshold: 0.5,
+		MinRequests:    2,
+		OpenDuration:   20 * time.Millisecond,
+	})
+	gp := pool.NewGRPCPool(time.Minute)
+	defer gp.CloseAll()
+	dir := NewDirector(selector.NewRangeSelector(reg, h, cm, 0), cm, gp)
+
+	// Trip shard1's gRPC breaker, then let the cooldown elapse so the
+	// selector readmits it as a (half-open-probe) candidate.
+	cm.Record("shard1", types.ProtoGRPC, false)
+	cm.Record("shard1", types.ProtoGRPC, false)
+	time.Sleep(40 * time.Millisecond)
+
+	// direct runs one routing decision with the post-call slot installed
+	// (as streamHandler does) and reports the chosen backend. The pool's
+	// gRPC dial is lazy, so no live upstream is needed.
+	direct := func() string {
+		t.Helper()
+		slot := &atomicString{}
+		ctx := context.WithValue(context.Background(), chosenBackendKey, slot)
+		ctx = metadata.NewIncomingContext(ctx, metadata.New(map[string]string{HeightHeader: "12345"}))
+		if _, _, err := dir.Direct(ctx, "/grpc.health.v1.Health/Check"); err != nil {
+			t.Fatalf("Direct: %v", err)
+		}
+		return slot.Get()
+	}
+
+	// Height 12345 is in shard1's coverage, so shard1 outranks archive.
+	if got := direct(); got != "shard1" {
+		t.Fatalf("first Direct should claim the half-open shard1 canary; chose %q", got)
+	}
+	if got := direct(); got != "archive" {
+		t.Fatalf("second Direct must skip shard1 while its canary is unresolved; chose %q", got)
+	}
+
+	// Client vanished: the admission is released without a sample, so the
+	// canary slot is claimable again and the circuit state is untouched.
+	dir.ReleaseOutcome("shard1")
+	if got := direct(); got != "shard1" {
+		t.Fatalf("after ReleaseOutcome the canary slot should be claimable again; chose %q", got)
+	}
+	if st := cm.State("shard1", types.ProtoGRPC); st != circuit.StateHalfOpen {
+		t.Fatalf("ReleaseOutcome must not resolve the circuit; state %s", st)
+	}
+
+	// A real outcome resolves it: the canary success closes the breaker.
+	dir.RecordOutcome("shard1", true)
+	if st := cm.State("shard1", types.ProtoGRPC); st != circuit.StateClosed {
+		t.Fatalf("canary success should close the breaker; state %s", st)
+	}
+}
+
 // helpers --------------------------------------------------------------
 
 func grpcUnavailable(msg string) error {
