@@ -61,6 +61,22 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Fixed
 
+- Circuit accounting now reflects what clients actually experienced: an
+  upstream HTTP 500 relayed to the client records a circuit failure
+  (previously counted as success), a response truncated mid-body by the
+  upstream records a failure and increments the new
+  `stitch_relay_truncated_total{backend,protocol}` counter, and a client
+  disconnecting mid-attempt releases the attempt without debiting the
+  backend. Half-open circuits admit exactly one canary request at a time
+  (previously unlimited concurrent canaries could pile onto a recovering
+  backend).
+- Live WebSocket sessions (eth_ws and `/injstream-ws`) are closed during
+  graceful shutdown — `http.Server.Shutdown` neither waits for nor closes
+  hijacked connections, so live clients previously kept their sessions (and
+  upstream dials) past the drain. Upstream notifications that match no live
+  subscription are now counted in the new
+  `stitch_subscription_dropped_notifications_total{protocol,reason}` family
+  instead of vanishing silently.
 - A flapping ChainStream upstream is now re-dialed with jittered
   exponential backoff (250ms doubling to a 5s cap, ±20% jitter) between
   resume attempts; previously all 8 attempts fired back-to-back, hammering

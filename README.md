@@ -6,8 +6,8 @@ stitch sits in front of any number of upstream nodes — full archives, bounded
 shards, pruned tips — and routes every request to the right one based on
 height, hash, or method semantics. Backends fail without taking client
 requests with them. Subscriptions resume across upstream restarts with
-cursor-deduped continuity. Multiple clients on the same filter share one
-upstream connection.
+cursor-deduped continuity. Opt in to multicast and clients on the same
+filter share one upstream connection.
 
 Open-source, MIT-licensed, written in Go.
 
@@ -433,6 +433,8 @@ stitch_failover_attempts_total{from,to,reason}
 stitch_cache_total{layer,result}                           # hashidx|response, hit|miss|evict|expired|purge
 stitch_subscriptions_active{protocol,kind}
 stitch_subscription_resumes_total{reason}
+stitch_subscription_dropped_notifications_total{protocol,reason}  # unknown_sub|slow_consumer|upstream_reject
+stitch_relay_truncated_total{backend,protocol}             # upstream died mid-body; client got a partial response
 stitch_broadcast_fanout_total{result}                      # success|partial|total_failure|all_circuited
 stitch_hedge_wins_total{method,winner_index}               # 0|1
 ```
@@ -532,7 +534,8 @@ internal/
 ├── pool                    HTTP transport pool + gRPC ClientConn pool with eviction
 ├── selector                Range-based candidate scoring (specificity + health + lag)
 ├── forwarder               HTTP forwarder with retry, broadcast fan-out, hedging
-├── subscription            Cursor + session + cross-protocol resume + multicast hub
+├── subscription            Session engine + protocol adapters + cursor resume + multicast hub
+├── wsurl                   ws/wss endpoint URL normalization (shared by sessions, hub, prober)
 └── cache                   Hash → height memo + response cache + key + policy
 
 manifests                   per-protocol method manifests (ship embedded)

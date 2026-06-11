@@ -127,8 +127,8 @@ func dial(ctx context.Context, addr string) (*grpc.ClientConn, error) {
 			PermitWithoutStream: true,
 		}),
 		grpc.WithDefaultCallOptions(
-			grpc.MaxCallRecvMsgSize(64 * 1024 * 1024),
-			grpc.MaxCallSendMsgSize(64 * 1024 * 1024),
+			grpc.MaxCallRecvMsgSize(64*1024*1024),
+			grpc.MaxCallSendMsgSize(64*1024*1024),
 		),
 	}
 	if useTLS(addr) {
