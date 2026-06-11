@@ -1,6 +1,6 @@
 // Package selector picks an ordered list of backend candidates for a given
-// route. The default RangeSelector scores by specificity, health, and
-// circuit state.
+// route. The default RangeSelector hard-filters on health and circuit
+// state, then scores by specificity and lag.
 package selector
 
 import (
@@ -19,30 +19,27 @@ type Selector interface {
 }
 
 // Weights tune the scoring function. Defaults bias toward specificity so
-// archive nodes are spared cheap historical reads.
+// archive nodes are spared cheap historical reads. Health and circuit
+// state are hard gates in Candidates, not score terms.
 type Weights struct {
 	Specificity float64
-	Health      float64
-	CircuitOpen float64
 	Lag         float64
 }
 
 func DefaultWeights() Weights {
 	return Weights{
 		Specificity: 1.0,
-		Health:      0.6,
-		CircuitOpen: 1000.0, // dominant penalty: practically excludes open circuits
 		Lag:         0.2,
 	}
 }
 
 // RangeSelector implements Selector based on backend coverage + health.
 type RangeSelector struct {
-	registry  *backend.Registry
-	health    *health.Registry
-	circuit   *circuit.Manager
-	weights   Weights
-	maxLag    int64
+	registry *backend.Registry
+	health   *health.Registry
+	circuit  *circuit.Manager
+	weights  Weights
+	maxLag   int64
 }
 
 func NewRangeSelector(reg *backend.Registry, h *health.Registry, c *circuit.Manager, maxLag int64) *RangeSelector {
@@ -71,6 +68,7 @@ func (s *RangeSelector) Candidates(k types.RouteKey) []*backend.Backend {
 		b     *backend.Backend
 		score float64
 	}
+	hProtos := healthProtocols(k.Protocol)
 	picks := make([]scored, 0, len(all))
 	for _, b := range all {
 		if !b.Has(k.Protocol) {
@@ -90,10 +88,22 @@ func (s *RangeSelector) Candidates(k types.RouteKey) []*backend.Backend {
 				continue
 			}
 		}
-		// Health gate
-		hs, ok := s.health.Get(b.Name, healthProtocol(k.Protocol))
-		if !ok {
-			// No probe yet: treat as healthy, score conservatively.
+		// Health gate: take the first snapshot along the protocol's witness
+		// chain (see healthProtocols).
+		var (
+			hs    health.Snapshot
+			found bool
+		)
+		for _, hp := range hProtos {
+			if hs, found = s.health.Get(b.Name, hp); found {
+				break
+			}
+		}
+		if !found {
+			// No prober covers this backend at all — e.g. eth_rpc-only
+			// with neither an rpc endpoint (RPC prober) nor an eth_ws
+			// endpoint (WS head prober). Treat as healthy rather than
+			// unroutable.
 			hs = health.Snapshot{Healthy: true}
 		}
 		if !hs.Healthy {
@@ -117,21 +127,22 @@ func (s *RangeSelector) Candidates(k types.RouteKey) []*backend.Backend {
 	return out
 }
 
-// score is higher = better candidate.
+// scoreBaseline keeps the weighted inner term strictly positive across the
+// representable range (lagPenalty ≤ 1 by the pre-score filter, specificity
+// ≥ 0.05), so a higher operator weight can never rank a backend below a
+// lower-weighted peer. Without it, weight bias inverts under heavy lag.
+const scoreBaseline = 0.6
+
+// score is higher = better candidate. Only healthy backends reach here
+// (unhealthy ones are filtered in Candidates), so health is not a term.
 func (s *RangeSelector) score(b *backend.Backend, hs health.Snapshot, head int64) float64 {
 	specificity := specificityScore(b.Coverage, head)
-	healthScore := 0.0
-	if hs.Healthy {
-		healthScore = 1.0
-	}
 	lagPenalty := 0.0
 	if s.maxLag > 0 {
 		lagPenalty = float64(hs.Lag) / float64(s.maxLag)
 	}
 	weight := float64(b.Weight) / 100.0
-	return weight*(s.weights.Specificity*specificity+
-		s.weights.Health*healthScore-
-		s.weights.Lag*lagPenalty)
+	return weight * (scoreBaseline + s.weights.Specificity*specificity - s.weights.Lag*lagPenalty)
 }
 
 // specificityScore returns 1.0 for the narrowest coverage (a tiny pruned
@@ -154,14 +165,24 @@ func specificityScore(c backend.Coverage, head int64) float64 {
 	return s
 }
 
-// healthProtocol maps the request protocol to the protocol whose health
-// snapshot is most informative. EthRPC/EthWS/ChainStream all share a
-// chain-head signal that the RPC prober produces today.
-func healthProtocol(p types.Protocol) types.Protocol {
+// evmWitnessProtocols is the health-witness chain shared by the EVM/stream
+// request protocols. Package-level so the hot-path lookup doesn't allocate.
+var evmWitnessProtocols = []types.Protocol{types.ProtoRPC, types.ProtoEthWS}
+
+// healthProtocols ranks the snapshot protocols that can witness a request
+// protocol's health, most authoritative first; the first snapshot found
+// wins. EthRPC/EthWS/ChainStream all ride the same chain-head signal:
+// the CometBFT RPC prober (ProtoRPC) owns the authoritative height/lag
+// numbers, so its snapshot takes precedence when present; the eth_ws head
+// prober (ProtoEthWS) is the fallback witness for EVM-only backends that
+// expose no rpc endpoint and would otherwise never be health-gated. WS
+// snapshots carry no Lag (lag stays an RPC-prober concern) — when the WS
+// snapshot is the witness, stream liveness itself is the freshness signal.
+func healthProtocols(p types.Protocol) []types.Protocol {
 	switch p {
 	case types.ProtoEthRPC, types.ProtoEthWS, types.ProtoChainStream:
-		return types.ProtoRPC
+		return evmWitnessProtocols
 	default:
-		return p
+		return []types.Protocol{p}
 	}
 }

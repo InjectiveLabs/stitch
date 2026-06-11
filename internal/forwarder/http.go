@@ -14,7 +14,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/decentrio/stitch/internal/backend"
 	"github.com/decentrio/stitch/internal/circuit"
 	"github.com/decentrio/stitch/internal/log"
 	"github.com/decentrio/stitch/internal/metrics"
@@ -27,7 +26,7 @@ import (
 type Policy struct {
 	MaxAttempts       int
 	PerAttemptTimeout time.Duration
-	HedgeAfter        time.Duration // 0 disables hedging
+	HedgeAfter        time.Duration // hedge delay; 0 means the 200ms default (NewHTTP clamps) — disabling hedging is the listener's job (eth_rpc SetHedging)
 }
 
 // HTTP forwards an HTTP request by iterating selector candidates, applying
@@ -95,19 +94,36 @@ func (f *HTTP) Forward(w http.ResponseWriter, r *http.Request, key types.RouteKe
 	var lastErr error
 	attempts := 0
 	for _, b := range candidates {
+		// Client gone: nothing we write will be read. Stop attempting and
+		// leave the breakers of untried backends alone.
+		if r.Context().Err() != nil {
+			log.FromCtx(r.Context()).Debug("client disconnected; abandoning forward",
+				"protocol", string(key.Protocol),
+				"method", key.Method,
+				"attempts", attempts,
+			)
+			return
+		}
 		if attempts >= f.policy.MaxAttempts {
 			break
 		}
 		if !key.Idempotent && attempts > 0 {
 			break
 		}
-		attempts++
-		started := time.Now()
 
 		ep := b.Endpoint(key.Protocol)
 		if ep == "" {
 			continue
 		}
+		// Re-check the breaker at attempt time: it may have tripped between
+		// selection and now. Acquire also claims the single half-open
+		// canary slot. A skipped candidate consumes no attempt slot.
+		if !f.circuit.Acquire(b.Name, key.Protocol) {
+			continue
+		}
+		attempts++
+		started := time.Now()
+
 		upstreamURL, err := buildUpstreamURL(ep, r.URL.Path, r.URL.RawQuery)
 		if err != nil {
 			lastErr = err
@@ -132,6 +148,19 @@ func (f *HTTP) Forward(w http.ResponseWriter, r *http.Request, key types.RouteKe
 
 		if err != nil {
 			cancel()
+			if r.Context().Err() != nil {
+				// The client vanished mid-attempt: the error indicts
+				// nobody. Recording would debit an innocent backend;
+				// skipping the resolution entirely would strand a claimed
+				// half-open canary slot — so release the admission.
+				f.circuit.Release(b.Name, key.Protocol)
+				log.FromCtx(r.Context()).Debug("client gone mid-attempt; abandoning forward",
+					"backend", b.Name,
+					"protocol", string(key.Protocol),
+					"attempt", attempts,
+				)
+				return
+			}
 			lastErr = err
 			f.circuit.Record(b.Name, key.Protocol, false)
 			metrics.FailoverAttempts.WithLabelValues(b.Name, "next", classifyErr(err)).Inc()
@@ -153,14 +182,50 @@ func (f *HTTP) Forward(w http.ResponseWriter, r *http.Request, key types.RouteKe
 			continue
 		}
 
-		// Success — copy through.
+		// Pass-through. A non-retryable 5xx (e.g. a plain 500) is relayed
+		// as-is but still indicts the backend: never credit it as a
+		// circuit success.
+		upstreamOK := resp.StatusCode < 500
+
 		copyHeaders(w.Header(), resp.Header)
 		w.WriteHeader(resp.StatusCode)
-		_, _ = io.Copy(w, resp.Body)
+		body := &errLatchReader{r: resp.Body}
+		_, copyErr := io.Copy(w, body)
 		_ = resp.Body.Close()
 		cancel()
 
-		f.circuit.Record(b.Name, key.Protocol, true)
+		if body.err != nil {
+			// Upstream died mid-body. Headers (and part of the body) are
+			// already written, so the response cannot be salvaged — debit
+			// the breaker and stop. The request still terminated through
+			// this backend: count it in the primary traffic metrics.
+			f.circuit.Record(b.Name, key.Protocol, false)
+			metrics.RelayTruncated.WithLabelValues(b.Name, string(key.Protocol)).Inc()
+			metrics.RequestsTotal.WithLabelValues(string(key.Protocol), key.Class.String(), b.Name, statusBucket(resp.StatusCode)).Inc()
+			metrics.RequestDuration.WithLabelValues(string(key.Protocol), key.Class.String(), b.Name).Observe(dur.Seconds())
+			log.FromCtx(r.Context()).Warn("upstream body truncated mid-relay",
+				"backend", b.Name,
+				"protocol", string(key.Protocol),
+				"err", body.err.Error(),
+				"attempt", attempts,
+			)
+			return
+		}
+		if copyErr != nil {
+			// Only the client-side write failed; the upstream served fine.
+			// Don't blame the backend — but the request still terminated
+			// through it, so count it in the primary traffic metrics.
+			f.circuit.Record(b.Name, key.Protocol, upstreamOK)
+			metrics.RequestsTotal.WithLabelValues(string(key.Protocol), key.Class.String(), b.Name, statusBucket(resp.StatusCode)).Inc()
+			metrics.RequestDuration.WithLabelValues(string(key.Protocol), key.Class.String(), b.Name).Observe(dur.Seconds())
+			log.FromCtx(r.Context()).Debug("client write failed mid-relay",
+				"backend", b.Name,
+				"err", copyErr.Error(),
+			)
+			return
+		}
+
+		f.circuit.Record(b.Name, key.Protocol, upstreamOK)
 		metrics.RequestsTotal.WithLabelValues(string(key.Protocol), key.Class.String(), b.Name, statusBucket(resp.StatusCode)).Inc()
 		metrics.RequestDuration.WithLabelValues(string(key.Protocol), key.Class.String(), b.Name).Observe(dur.Seconds())
 		return
@@ -177,6 +242,22 @@ func (f *HTTP) Forward(w http.ResponseWriter, r *http.Request, key types.RouteKe
 	)
 	writeJSONError(w, http.StatusBadGateway, lastErr.Error())
 	metrics.RequestsTotal.WithLabelValues(string(key.Protocol), key.Class.String(), "-", "all_failed").Inc()
+}
+
+// errLatchReader wraps an upstream response body and latches the first
+// non-EOF read error, so the relay loop can tell "upstream died mid-body"
+// apart from "client stopped reading" after an io.Copy.
+type errLatchReader struct {
+	r   io.Reader
+	err error
+}
+
+func (l *errLatchReader) Read(p []byte) (int, error) {
+	n, err := l.r.Read(p)
+	if err != nil && !errors.Is(err, io.EOF) && l.err == nil {
+		l.err = err
+	}
+	return n, err
 }
 
 func buildUpstreamURL(base, path, rawQuery string) (string, error) {
@@ -270,8 +351,3 @@ func jsonString(s string) string {
 	sb.WriteByte('"')
 	return sb.String()
 }
-
-// Reference to keep the backend import surface visible to tooling that
-// strips unused imports — backend.Backend is exported into the candidate
-// list returned by the selector.
-var _ = (*backend.Backend)(nil)

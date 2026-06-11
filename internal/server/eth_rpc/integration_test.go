@@ -27,6 +27,7 @@ type mockEth struct {
 	name     string
 	hits     atomic.Int64
 	dead     atomic.Bool
+	delay    atomic.Int64 // response delay in nanoseconds
 	filterID atomic.Int64
 	srv      *httptest.Server
 }
@@ -42,6 +43,9 @@ func (m *mockEth) handle(w http.ResponseWriter, r *http.Request) {
 	if m.dead.Load() {
 		w.WriteHeader(http.StatusServiceUnavailable)
 		return
+	}
+	if d := m.delay.Load(); d > 0 {
+		time.Sleep(time.Duration(d))
 	}
 	body, _ := io.ReadAll(r.Body)
 	var req struct {

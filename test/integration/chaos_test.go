@@ -66,8 +66,8 @@ func (m *flickerMock) handle(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (m *flickerMock) Kill()   { m.dead.Store(true) }
-func (m *flickerMock) Revive() { m.dead.Store(false) }
+func (m *flickerMock) Kill()       { m.dead.Store(true) }
+func (m *flickerMock) Revive()     { m.dead.Store(false) }
 func (m *flickerMock) URL() string { return m.addr }
 
 func TestChaosRollingBackendKillsKeepsClientsHappy(t *testing.T) {

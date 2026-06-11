@@ -75,11 +75,14 @@ type FailoverPolicy struct {
 	PerAttemptTimeout time.Duration `yaml:"per_attempt_timeout"`
 }
 
+// HedgingPolicy gates hedged dispatch. Hedging only fires for methods the
+// manifest flags hedge-safe; Enabled turns the feature on, Methods (when
+// non-empty) further restricts it to the listed method names, and
+// HedgeAfter is the delay before the second request fires.
 type HedgingPolicy struct {
-	Enabled       bool          `yaml:"enabled"`
-	Methods       []string      `yaml:"methods,omitempty"`
-	AfterPctOfP95 float64       `yaml:"after_pct_of_p95,omitempty"`
-	MaxHedge      time.Duration `yaml:"max_hedge,omitempty"`
+	Enabled    bool          `yaml:"enabled"`
+	Methods    []string      `yaml:"methods,omitempty"`
+	HedgeAfter time.Duration `yaml:"hedge_after,omitempty"`
 }
 
 type CircuitPolicy struct {
@@ -88,12 +91,18 @@ type CircuitPolicy struct {
 	OpenDuration   time.Duration `yaml:"open_duration"`
 }
 
+// CachePolicy tunes the response cache and the hash→height index. TTL is
+// the lifetime of response-cache entries; HashIndexEntries and
+// ResponseEntries cap the two caches' entry counts.
 type CachePolicy struct {
-	Enabled           bool   `yaml:"enabled"`
-	ConfirmationDepth int64  `yaml:"confirmation_depth"`
-	L1SizeMB          int    `yaml:"l1_size_mb,omitempty"`
-	L2Kind            string `yaml:"l2_kind,omitempty"` // none | redis
-	L2Addr            string `yaml:"l2_addr,omitempty"`
+	Enabled           bool          `yaml:"enabled"`
+	ConfirmationDepth int64         `yaml:"confirmation_depth"`
+	TTL               time.Duration `yaml:"ttl,omitempty"`
+	HashIndexEntries  int           `yaml:"hash_index_entries,omitempty"`
+	ResponseEntries   int           `yaml:"response_entries,omitempty"`
+	L1SizeMB          int           `yaml:"l1_size_mb,omitempty"`
+	L2Kind            string        `yaml:"l2_kind,omitempty"` // none | redis
+	L2Addr            string        `yaml:"l2_addr,omitempty"`
 }
 
 type HealthPolicy struct {
@@ -101,10 +110,23 @@ type HealthPolicy struct {
 	MaxLagBlocks  int64         `yaml:"max_lag_blocks"`
 }
 
+// SubscriptionsPolicy tunes the WS subscription listeners.
+//
+// Multicast (default false) coalesces /injstream-ws clients with the same
+// canonical filter onto one shared upstream connection. SlowConsumer and
+// SendBuffer apply to the multicast fan-out: the policy when a client's
+// send buffer fills, and that buffer's capacity (default 64).
+// ReplayTimeout is the max time to wait for a dialable upstream during a
+// subscription resume before dropping the subscriber/session. It is a
+// pointer because an explicit 0 is meaningful — it disables the retry
+// window (a resume gets a single dial pass) — and a plain duration's YAML
+// zero value would be indistinguishable from "absent": nil (key absent)
+// is defaulted to 30s by applyDefaults; an explicit 0s survives.
 type SubscriptionsPolicy struct {
-	Multicast     bool          `yaml:"multicast"`
-	SlowConsumer  string        `yaml:"slow_consumer"` // drop | disconnect | backpressure
-	ReplayTimeout time.Duration `yaml:"replay_timeout"`
+	Multicast     bool           `yaml:"multicast"`
+	SlowConsumer  string         `yaml:"slow_consumer"` // drop | disconnect | backpressure
+	SendBuffer    int            `yaml:"send_buffer,omitempty"`
+	ReplayTimeout *time.Duration `yaml:"replay_timeout"`
 }
 
 // BackendConfig declares one upstream node.

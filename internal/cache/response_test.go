@@ -5,6 +5,10 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus/testutil"
+
+	"github.com/decentrio/stitch/internal/metrics"
 )
 
 func TestResponseCacheBasic(t *testing.T) {
@@ -94,6 +98,41 @@ func TestResponseCacheRejectsOversizedEntry(t *testing.T) {
 	}
 }
 
+func TestResponseCachePurge(t *testing.T) {
+	c := NewResponseCache(ResponseCacheOpts{Capacity: 10})
+	for i := 0; i < 4; i++ {
+		c.Set("k"+strconv.Itoa(i), []byte("value"), 0)
+	}
+	if c.Bytes() == 0 {
+		t.Fatal("expected non-zero byte accounting before purge")
+	}
+	purged := metrics.CacheTotal.WithLabelValues("response", "purge")
+	before := testutil.ToFloat64(purged)
+	if n := c.Purge(); n != 4 {
+		t.Errorf("purge returned %d; want 4", n)
+	}
+	if got := testutil.ToFloat64(purged) - before; got != 4 {
+		t.Errorf("cache_total{response,purge} advanced by %v; want 4", got)
+	}
+	if c.Size() != 0 {
+		t.Errorf("size after purge: %d", c.Size())
+	}
+	if c.Bytes() != 0 {
+		t.Errorf("bytes after purge: %d", c.Bytes())
+	}
+	if _, ok := c.Get("k0"); ok {
+		t.Error("purged key should miss")
+	}
+	if n := c.Purge(); n != 0 {
+		t.Errorf("second purge returned %d; want 0", n)
+	}
+	// Cache still works after a purge.
+	c.Set("again", []byte("v"), 0)
+	if got, ok := c.Get("again"); !ok || string(got) != "v" {
+		t.Errorf("set-after-purge: got %s %v", got, ok)
+	}
+}
+
 func TestResponseCacheConcurrent(t *testing.T) {
 	c := NewResponseCache(ResponseCacheOpts{Capacity: 100})
 	var wg sync.WaitGroup
@@ -136,13 +175,13 @@ func TestIsCacheableHeight(t *testing.T) {
 		height, head, depth int64
 		want                bool
 	}{
-		{100, 200, 50, true},   // 100 ≤ 150
-		{151, 200, 50, false},  // 151 > 150
-		{0, 200, 50, false},    // height 0 = not cacheable
-		{100, 0, 50, false},    // head 0 = no signal
-		{100, 100, 0, true},    // depth 0 + height = head
-		{200, 200, 0, true},    // height = head, depth 0
-		{200, 200, 1, false},   // height = head, depth 1 → 200 > 199
+		{100, 200, 50, true},  // 100 ≤ 150
+		{151, 200, 50, false}, // 151 > 150
+		{0, 200, 50, false},   // height 0 = not cacheable
+		{100, 0, 50, false},   // head 0 = no signal
+		{100, 100, 0, true},   // depth 0 + height = head
+		{200, 200, 0, true},   // height = head, depth 0
+		{200, 200, 1, false},  // height = head, depth 1 → 200 > 199
 	} {
 		got := IsCacheableHeight(c.height, c.head, c.depth)
 		if got != c.want {

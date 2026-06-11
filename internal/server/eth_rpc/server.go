@@ -13,6 +13,7 @@ import (
 	"github.com/decentrio/stitch/internal/forwarder"
 	"github.com/decentrio/stitch/internal/log"
 	"github.com/decentrio/stitch/internal/runtime"
+	"github.com/decentrio/stitch/internal/server"
 	"github.com/decentrio/stitch/internal/types"
 )
 
@@ -26,8 +27,13 @@ type Server struct {
 	respCache *cache.ResponseCache
 	head      cache.HeadProvider
 	confDepth int64
+	cacheTTL  time.Duration
 	dangerous *DangerousAllowlist
-	srv       *http.Server
+	// hedgeEnabled/hedgeMethods gate hedged dispatch on top of the
+	// manifest's per-method hedge flag; see SetHedging.
+	hedgeEnabled bool
+	hedgeMethods map[string]struct{}
+	srv          *http.Server
 }
 
 func New(addr string, fwd *forwarder.HTTP) *Server {
@@ -50,12 +56,46 @@ func New(addr string, fwd *forwarder.HTTP) *Server {
 // height-keyed routes, and (b) populates it from successful responses.
 func (s *Server) SetHashCache(c *cache.HashIndex) { s.cache = c }
 
-// SetResponseCache wires a shared response-body cache and the chain-head
-// accessor used to gate cacheability by confirmation depth.
-func (s *Server) SetResponseCache(c *cache.ResponseCache, head cache.HeadProvider, confirmationDepth int64) {
+// SetResponseCache wires a shared response-body cache, the chain-head
+// accessor used to gate cacheability by confirmation depth, and the TTL
+// applied to entries this server stores (ttl ≤ 0 stores without expiry).
+func (s *Server) SetResponseCache(c *cache.ResponseCache, head cache.HeadProvider, confirmationDepth int64, ttl time.Duration) {
 	s.respCache = c
 	s.head = head
 	s.confDepth = confirmationDepth
+	s.cacheTTL = ttl
+}
+
+// SetHedging gates hedged dispatch. Hedging stays off (the default) until
+// enabled here; an empty methods list lets every manifest-flagged method
+// hedge, a non-empty list restricts hedging to methods present in BOTH the
+// manifest flag and the list. Call before the listener starts serving.
+func (s *Server) SetHedging(enabled bool, methods []string) {
+	s.hedgeEnabled = enabled
+	s.hedgeMethods = nil
+	if len(methods) > 0 {
+		s.hedgeMethods = make(map[string]struct{}, len(methods))
+		for _, m := range methods {
+			s.hedgeMethods[m] = struct{}{}
+		}
+	}
+}
+
+// applyHedgePolicy clears the decoded hedge flag unless operator config
+// allows this method to hedge.
+func (s *Server) applyHedgePolicy(d *decoded) {
+	if !d.key.Hedge {
+		return
+	}
+	if !s.hedgeEnabled {
+		d.key.Hedge = false
+		return
+	}
+	if s.hedgeMethods != nil {
+		if _, ok := s.hedgeMethods[d.method]; !ok {
+			d.key.Hedge = false
+		}
+	}
 }
 
 // SetDangerousAllowlist installs the operator-provided opt-in list of
@@ -133,6 +173,9 @@ func (s *Server) handleSingle(w http.ResponseWriter, r *http.Request, body []byt
 	}
 	ctx := log.WithMethod(r.Context(), d.method)
 
+	// Operator config gates hedging on top of the manifest flag.
+	s.applyHedgePolicy(&d)
+
 	// Hash-memo fast path: if the cache knows the height for this hash,
 	// rewrite to a height-keyed route. The selector picks the cheapest
 	// backend whose coverage includes the height, instead of having to
@@ -172,15 +215,15 @@ func (s *Server) handleSingle(w http.ResponseWriter, r *http.Request, body []byt
 				return
 			}
 			// Miss — capture, forward, populate.
-			cap := newCapture(w.Header())
+			cap := server.NewCapture(w.Header())
 			cap.Header().Set("x-stitch-cache", "miss")
 			dispatch(cap, r.WithContext(ctx), d.key)
-			cap.flushTo(w)
-			if cap.status >= 200 && cap.status < 300 {
-				s.respCache.Set(cacheKey, cap.body.Bytes(), 5*time.Minute)
+			cap.FlushTo(w)
+			if cap.Status() >= 200 && cap.Status() < 300 {
+				s.respCache.Set(cacheKey, cap.BodyBytes(), s.cacheTTL)
 			}
 			if s.cache != nil && shouldPopulateCache(d.method) {
-				cache.PopulateFromEthResponse(s.cache, d.method, cap.body.Bytes())
+				cache.PopulateFromEthResponse(s.cache, d.method, cap.BodyBytes())
 			}
 			return
 		}
@@ -190,10 +233,10 @@ func (s *Server) handleSingle(w http.ResponseWriter, r *http.Request, body []byt
 	// the hash index, capture the response so we can populate after
 	// forwarding it through to the client.
 	if s.cache != nil && shouldPopulateCache(d.method) {
-		cap := newCapture(w.Header())
+		cap := server.NewCapture(w.Header())
 		dispatch(cap, r.WithContext(ctx), d.key)
-		cap.flushTo(w)
-		cache.PopulateFromEthResponse(s.cache, d.method, cap.body.Bytes())
+		cap.FlushTo(w)
+		cache.PopulateFromEthResponse(s.cache, d.method, cap.BodyBytes())
 		return
 	}
 
@@ -268,9 +311,9 @@ func (s *Server) handleBatch(w http.ResponseWriter, r *http.Request, body []byte
 	results := make([]json.RawMessage, len(raw))
 
 	for i := range raw {
-		rec := newCapture(parentHeader)
+		rec := server.NewCapture(parentHeader)
 		s.handleSingle(rec, r, raw[i])
-		results[i] = rec.body.Bytes()
+		results[i] = rec.BodyBytes()
 	}
 
 	w.WriteHeader(http.StatusOK)
@@ -303,9 +346,9 @@ func (s *Server) handleBatch(w http.ResponseWriter, r *http.Request, body []byte
 func (s *Server) handleFilterCall(w http.ResponseWriter, r *http.Request, d decoded, body []byte) {
 	r.Body = io.NopCloser(bytes.NewReader(body))
 	r.ContentLength = int64(len(body))
-	cap := newCapture(w.Header())
+	cap := server.NewCapture(w.Header())
 	s.fwd.Forward(cap, r, d.key)
-	cap.flushTo(w)
+	cap.FlushTo(w)
 
 	if d.expectFilterMint {
 		// Parse the captured response; if it's a JSON-RPC ok with a string
@@ -313,7 +356,7 @@ func (s *Server) handleFilterCall(w http.ResponseWriter, r *http.Request, d deco
 		var resp struct {
 			Result string `json:"result"`
 		}
-		if err := json.Unmarshal(cap.body.Bytes(), &resp); err == nil && resp.Result != "" {
+		if err := json.Unmarshal(cap.BodyBytes(), &resp); err == nil && resp.Result != "" {
 			// We don't currently know which backend served the mint; the
 			// FilterStore binds to "_unknown_" so phase 3 still tracks the
 			// id but routes via the standard selector for now. Phase 6 will
@@ -324,35 +367,6 @@ func (s *Server) handleFilterCall(w http.ResponseWriter, r *http.Request, d deco
 	if d.followFilterID != "" && d.method == "eth_uninstallFilter" {
 		s.filters.Forget(d.followFilterID)
 	}
-}
-
-// capture is a tiny ResponseWriter that buffers status/body for batching
-// and filter bookkeeping.
-type capture struct {
-	header http.Header
-	status int
-	body   bytes.Buffer
-}
-
-func newCapture(parent http.Header) *capture {
-	return &capture{header: parent.Clone(), status: 200}
-}
-
-func (c *capture) Header() http.Header        { return c.header }
-func (c *capture) WriteHeader(code int)       { c.status = code }
-func (c *capture) Write(b []byte) (int, error) {
-	return c.body.Write(b)
-}
-
-// flushTo copies the captured response onto a real ResponseWriter.
-func (c *capture) flushTo(w http.ResponseWriter) {
-	for k, vs := range c.header {
-		for _, v := range vs {
-			w.Header().Add(k, v)
-		}
-	}
-	w.WriteHeader(c.status)
-	_, _ = w.Write(c.body.Bytes())
 }
 
 // JSON-RPC framing helpers ---------------------------------------------

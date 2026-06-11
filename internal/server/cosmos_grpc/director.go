@@ -62,7 +62,8 @@ func (a *atomicString) Get() string {
 //  3. Builds a RouteKey based on the method name (broadcast methods are
 //     non-idempotent; everything else is idempotent and may be retried).
 //  4. Asks the selector for ordered candidates.
-//  5. Tries each — circuit-allowed and dial-able — until one succeeds.
+//  5. Tries each — circuit-admitted (Acquire) and dial-able — until one
+//     succeeds.
 //
 // mwitkow's TransparentHandler will replay the bidirectional stream onto
 // the chosen connection. Note: streaming RPCs cannot be transparently
@@ -80,6 +81,13 @@ func NewDirector(s selector.Selector, c *circuit.Manager, p *pool.GRPCPool) *Dir
 
 // Direct chooses an upstream for fullMethodName. Returns the modified
 // outgoing context, the gRPC conn to dial, or a status error.
+//
+// Committing to a backend claims a circuit admission (Acquire); every
+// admission is resolved by exactly one Record or Release — dial failures
+// here, RPC outcomes via the post-call wrapper (streamHandler →
+// RecordOutcome / ReleaseOutcome). Direct must therefore only run under
+// streamHandler, which installs the chosen-backend slot it reports
+// through.
 func (d *Director) Direct(ctx context.Context, fullMethodName string) (context.Context, *grpc.ClientConn, error) {
 	rid := runtime.NewRequestID()
 	ctx = log.WithRequestID(ctx, rid)
@@ -97,11 +105,14 @@ func (d *Director) Direct(ctx context.Context, fullMethodName string) (context.C
 	}
 
 	for _, b := range candidates {
-		if !d.circuit.Allow(b.Name, types.ProtoGRPC) {
-			continue
-		}
 		ep := b.Endpoint(types.ProtoGRPC)
 		if ep == "" {
+			continue
+		}
+		// Re-check the breaker at commit time: it may have tripped between
+		// selection and now. Acquire also claims the single half-open
+		// canary slot; a skipped candidate claims nothing.
+		if !d.circuit.Acquire(b.Name, types.ProtoGRPC) {
 			continue
 		}
 		conn, err := d.pool.Conn(ctx, b.Name, pool.CleanAddr(ep))
@@ -111,7 +122,6 @@ func (d *Director) Direct(ctx context.Context, fullMethodName string) (context.C
 			metrics.FailoverAttempts.WithLabelValues(b.Name, "next", "dial").Inc()
 			continue
 		}
-		d.pool.Touch(b.Name)
 		ctx = log.WithBackend(ctx, b.Name)
 		if slot := chosenSlot(ctx); slot != nil {
 			slot.Set(b.Name)
@@ -130,13 +140,24 @@ func (d *Director) Direct(ctx context.Context, fullMethodName string) (context.C
 }
 
 // RecordOutcome lets the gRPC server tell the director whether the actual
-// RPC succeeded; the director feeds the circuit breaker. Called from the
-// post-call interceptor.
+// RPC succeeded; the director feeds the circuit breaker, resolving the
+// admission claimed in Direct. Called from the post-call wrapper.
 func (d *Director) RecordOutcome(backend string, success bool) {
 	if backend == "" {
 		return
 	}
 	d.circuit.Record(backend, types.ProtoGRPC, success)
+}
+
+// ReleaseOutcome abandons the admission claimed in Direct without
+// recording a sample — for RPCs whose outcome says nothing about the
+// backend (the client vanished mid-stream). Frees a claimed half-open
+// canary slot; mirrors the forwarder's Release convention.
+func (d *Director) ReleaseOutcome(backend string) {
+	if backend == "" {
+		return
+	}
+	d.circuit.Release(backend, types.ProtoGRPC)
 }
 
 // buildRouteKey reads metadata + method name and produces a routing

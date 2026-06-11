@@ -74,6 +74,11 @@ func (p *RESTProber) probe(ctx context.Context, name, base string) {
 		UpdatedAt: time.Now(),
 	}
 	defer func() {
+		// A hot reload may have pruned this backend while the probe was in
+		// flight; publishing now would resurrect its snapshot and gauges.
+		if !p.registry.Has(name) {
+			return
+		}
 		p.health.Update(snap)
 		emitHealth(snap)
 	}()

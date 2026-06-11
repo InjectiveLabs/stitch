@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/rand"
 	"strconv"
@@ -17,6 +18,7 @@ import (
 	"github.com/decentrio/stitch/internal/log"
 	"github.com/decentrio/stitch/internal/metrics"
 	"github.com/decentrio/stitch/internal/types"
+	"github.com/decentrio/stitch/internal/wsurl"
 )
 
 // EthWSProber maintains a long-lived eth_subscribe newHeads stream per
@@ -25,10 +27,12 @@ import (
 // atomic MaxHead bumps automatically, giving the selector near-real-time
 // head with no API changes elsewhere.
 //
-// Health for EVM HTTP routing continues to be sourced from the CometBFT
-// /status poll via selector.healthProtocol(ProtoEthRPC) -> ProtoRPC.
-// A dropped WS connection therefore degrades freshness only, not
-// eligibility.
+// Health for EVM routing prefers the CometBFT /status poll (the ProtoRPC
+// snapshot) when the backend has an rpc endpoint; for EVM-only backends
+// the selector falls back to this prober's ProtoEthWS snapshot (see
+// selector.healthProtocols). A dropped stream therefore degrades only
+// freshness for dual-stack backends, but marks EVM-only backends
+// unhealthy until the stream reconnects.
 type EthWSProber struct {
 	registry *backend.Registry
 	health   *Registry
@@ -39,6 +43,9 @@ type EthWSProber struct {
 	baseBackoff            time.Duration
 	maxBackoff             time.Duration
 	healthyStreamThreshold time.Duration
+
+	// kick requests an immediate reconciliation (buffered 1; coalesces).
+	kick chan struct{}
 
 	rand *rand.Rand
 	mu   sync.Mutex // guards rand (rand.Rand is not goroutine-safe)
@@ -54,7 +61,19 @@ func NewEthWSProber(reg *backend.Registry, h *Registry) *EthWSProber {
 		baseBackoff:            1 * time.Second,
 		maxBackoff:             30 * time.Second,
 		healthyStreamThreshold: 5 * time.Second,
+		kick:                   make(chan struct{}, 1),
 		rand:                   rand.New(rand.NewSource(time.Now().UnixNano())),
+	}
+}
+
+// Kick requests an immediate reconciliation of trackers against the
+// backend registry — the reload path calls this right after registry.Set
+// so trackers for removed backends are cancelled now rather than at the
+// next refresh tick. Non-blocking; multiple kicks coalesce.
+func (p *EthWSProber) Kick() {
+	select {
+	case p.kick <- struct{}{}:
+	default:
 	}
 }
 
@@ -114,6 +133,8 @@ func (p *EthWSProber) Run(ctx context.Context) {
 			return
 		case <-t.C:
 			reconcile()
+		case <-p.kick:
+			reconcile()
 		}
 	}
 }
@@ -141,8 +162,37 @@ func (p *EthWSProber) trackOne(ctx context.Context, name, ep string) {
 		if ctx.Err() != nil {
 			return
 		}
-		// Stream dropped — mark unhealthy so operators see it in dashboards.
-		metrics.BackendHealth.WithLabelValues(name, string(types.ProtoEthWS)).Set(0)
+		if errors.Is(err, errBackendRemoved) {
+			// A hot reload pruned this backend. Reconcile will cancel our
+			// ctx shortly anyway, but exiting now stops the per-block
+			// snapshot/gauge resurrection — and we must not touch the
+			// just-deleted BackendHealth child below.
+			return
+		}
+		// Stream dropped — mark unhealthy for routing, not just dashboards:
+		// write an unhealthy ProtoEthWS snapshot so selectors that fall back
+		// to the WS witness (EVM-only backends with no CometBFT rpc endpoint)
+		// stop routing here until the stream reconnects and heads flow again
+		// (the per-frame Update in subscribeAndStream flips Healthy back).
+		// Carry the last known height forward — MaxHead is monotonic either
+		// way, but the truthful height keeps the snapshot useful.
+		// Guarded on registry membership like the per-frame publish: after a
+		// hot-reload prune this bookkeeping would resurrect the pruned
+		// snapshot and gauge child in the window before reconcile cancels us.
+		if p.registry.Has(name) {
+			metrics.BackendHealth.WithLabelValues(name, string(types.ProtoEthWS)).Set(0)
+			// Single-writer: only this backend's trackOne goroutine writes the
+			// (name, ProtoEthWS) snapshot, so Get-then-Update is race-free.
+			last, _ := p.health.Get(name, types.ProtoEthWS)
+			p.health.Update(Snapshot{
+				Backend:      name,
+				Protocol:     types.ProtoEthWS,
+				Healthy:      false,
+				LatestHeight: last.LatestHeight,
+				LastError:    errString(err),
+				UpdatedAt:    time.Now(),
+			})
+		}
 		log.L().Warn("eth_ws head stream dropped", "backend", name, "err", errString(err))
 		if time.Since(start) >= p.healthyStreamThreshold {
 			// Stream lasted long enough that we treat it as healthy —
@@ -199,11 +249,15 @@ const (
 	wsSubscribeRequest = `{"jsonrpc":"2.0","id":1,"method":"eth_subscribe","params":["newHeads"]}`
 )
 
+// errBackendRemoved signals that the tracked backend disappeared from the
+// registry (hot reload); trackOne exits instead of reconnecting.
+var errBackendRemoved = errors.New("backend removed from registry")
+
 // subscribeAndStream dials ep, sends eth_subscribe newHeads, then loops
 // reading frames and pushing each header into the health registry. Returns
 // on any I/O error or when ctx is cancelled.
 func (p *EthWSProber) subscribeAndStream(ctx context.Context, name, ep string) error {
-	wsURL := normalizeWS(ep)
+	wsURL := wsurl.Normalize(ep)
 	conn, _, err := p.dialer.DialContext(ctx, wsURL, nil)
 	if err != nil {
 		return fmt.Errorf("dial %s: %w", wsURL, err)
@@ -256,6 +310,12 @@ func (p *EthWSProber) subscribeAndStream(ctx context.Context, name, ep string) e
 		height, ok := parseNewHeadsNotification(frame)
 		if !ok || height <= 0 {
 			continue
+		}
+		// A hot reload may have pruned this backend; publishing would
+		// resurrect its snapshot and gauges on every new head until the
+		// next reconcile. Stop the tracker instead.
+		if !p.registry.Has(name) {
+			return errBackendRemoved
 		}
 		snap := Snapshot{
 			Backend:      name,
@@ -311,19 +371,4 @@ func parseNewHeadsNotification(raw []byte) (int64, bool) {
 		return 0, false
 	}
 	return h, true
-}
-
-// normalizeWS maps http(s):// to ws(s):// for endpoints configured as
-// HTTP URLs; pass-through for already-ws URLs or unknown schemes.
-func normalizeWS(ep string) string {
-	switch {
-	case strings.HasPrefix(ep, "ws://"), strings.HasPrefix(ep, "wss://"):
-		return ep
-	case strings.HasPrefix(ep, "http://"):
-		return "ws://" + strings.TrimPrefix(ep, "http://")
-	case strings.HasPrefix(ep, "https://"):
-		return "wss://" + strings.TrimPrefix(ep, "https://")
-	default:
-		return ep
-	}
 }

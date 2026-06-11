@@ -24,8 +24,9 @@ policies:
     per_attempt_timeout: 5s
   hedging:
     enabled: true
+    # eth_rpc-only today; abci_query is inert until cmt_rpc hedges
     methods: [eth_call, eth_estimateGas, abci_query]
-    after_pct_of_p95: 1.5
+    hedge_after: 200ms        # delay before the second request
   circuit:
     error_threshold: 0.5
     min_requests: 20
@@ -33,6 +34,9 @@ policies:
   cache:
     enabled: true
     confirmation_depth: 100   # finalized = head − 100
+    ttl: 5m                   # response-cache entry lifetime
+    hash_index_entries: 100000
+    response_entries: 50000
     l1_size_mb: 1024
   health:
     probe_interval: 5s
@@ -43,7 +47,9 @@ policies:
                                        # appear ~probe_interval × block_rate blocks behind.
                                        # Set this comfortably above that gap, or omit it.
   subscriptions:
-    multicast: true
+    # opt-in: N clients with the same filter share one upstream; non-subscribe
+    # frames are rejected in this mode — see README
+    multicast: false
     slow_consumer: drop
     replay_timeout: 30s
 

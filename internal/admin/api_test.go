@@ -182,6 +182,81 @@ func TestAdminCacheStats(t *testing.T) {
 	}
 }
 
+func TestAdminCachePurge(t *testing.T) {
+	_, front, _, _, _, hi, rc := makeRig(t)
+
+	hi.Set("0xa", 1)
+	hi.Set("0xb", 2)
+	hi.Set("0xc", 3)
+	rc.Set("k1", []byte("v1"), 0)
+	rc.Set("k2", []byte("v2"), 0)
+
+	resp, err := http.Post(front.URL+"/admin/cache/purge", "", strings.NewReader(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status=%d body=%s", resp.StatusCode, body)
+	}
+	var got struct {
+		HashIndexPurged int `json:"hash_index_purged"`
+		ResponsePurged  int `json:"response_purged"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got.HashIndexPurged != 3 {
+		t.Errorf("hash_index_purged=%d; want 3", got.HashIndexPurged)
+	}
+	if got.ResponsePurged != 2 {
+		t.Errorf("response_purged=%d; want 2", got.ResponsePurged)
+	}
+	if hi.Size() != 0 || rc.Size() != 0 {
+		t.Errorf("caches not emptied: hash=%d resp=%d", hi.Size(), rc.Size())
+	}
+}
+
+func TestAdminCachePurgeRequiresPOST(t *testing.T) {
+	_, front, _, _, _, _, _ := makeRig(t)
+
+	resp, err := http.Get(front.URL + "/admin/cache/purge")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405; got %d", resp.StatusCode)
+	}
+}
+
+func TestAdminCachePurgeWithoutCachesWired(t *testing.T) {
+	s := New("ignored")
+	s.SetDeps(Deps{})
+	front := httptest.NewServer(s.Handler())
+	defer front.Close()
+
+	resp, err := http.Post(front.URL+"/admin/cache/purge", "", strings.NewReader(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("nil caches should purge zero, not fail; status=%d", resp.StatusCode)
+	}
+	var got struct {
+		HashIndexPurged int `json:"hash_index_purged"`
+		ResponsePurged  int `json:"response_purged"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got.HashIndexPurged != 0 || got.ResponsePurged != 0 {
+		t.Errorf("expected zeros; got %+v", got)
+	}
+}
+
 func TestAdminReload(t *testing.T) {
 	s := New("ignored")
 	reloads := 0

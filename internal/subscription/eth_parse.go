@@ -61,9 +61,9 @@ func ParseEthNotification(raw []byte, kind Kind) (EthNotification, bool) {
 // id before forwarding to the client.
 func RewriteSubscriptionID(raw []byte, newID string) ([]byte, bool) {
 	var env struct {
-		JSONRPC string                 `json:"jsonrpc"`
-		Method  string                 `json:"method"`
-		Params  map[string]any         `json:"params"`
+		JSONRPC string         `json:"jsonrpc"`
+		Method  string         `json:"method"`
+		Params  map[string]any `json:"params"`
 	}
 	if err := json.Unmarshal(raw, &env); err != nil {
 		return nil, false

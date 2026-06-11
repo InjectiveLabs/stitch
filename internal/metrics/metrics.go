@@ -104,6 +104,14 @@ var (
 		},
 		[]string{"protocol"},
 	)
+	SubscriptionDroppedNotifs = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: Namespace,
+			Name:      "subscription_dropped_notifications_total",
+			Help:      "Upstream subscription frames dropped before reaching clients, by protocol and reason (unknown_sub: matched no live subscription; slow_consumer: fan-out policy eviction; upstream_reject: upstream answered the shared subscribe with a JSON-RPC error).",
+		},
+		[]string{"protocol", "reason"},
+	)
 	InflightRequests = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Namespace: Namespace,
@@ -127,6 +135,14 @@ var (
 			Help:      "Hedged-request wins by which candidate won.",
 		},
 		[]string{"method", "winner_index"},
+	)
+	RelayTruncated = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: Namespace,
+			Name:      "relay_truncated_total",
+			Help:      "Relayed responses whose upstream body failed mid-copy after headers were sent.",
+		},
+		[]string{"backend", "protocol"},
 	)
 	BuildInfo = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
@@ -154,9 +170,11 @@ func init() {
 		SubscriptionsActive,
 		SubscriptionResumes,
 		SubscriptionGaps,
+		SubscriptionDroppedNotifs,
 		InflightRequests,
 		BroadcastFanout,
 		HedgeWins,
+		RelayTruncated,
 		BuildInfo,
 	)
 	registry.MustRegister(prometheus.NewGoCollector())

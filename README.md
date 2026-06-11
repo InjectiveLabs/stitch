@@ -6,8 +6,8 @@ stitch sits in front of any number of upstream nodes — full archives, bounded
 shards, pruned tips — and routes every request to the right one based on
 height, hash, or method semantics. Backends fail without taking client
 requests with them. Subscriptions resume across upstream restarts with
-cursor-deduped continuity. Multiple clients on the same filter share one
-upstream connection.
+cursor-deduped continuity. Opt in to multicast and clients on the same
+filter share one upstream connection.
 
 Open-source, MIT-licensed, written in Go.
 
@@ -82,7 +82,7 @@ where each piece is independently testable and replaceable.
   Works for `eth_subscribe newHeads` + `logs`, `injective.stream.v*.Stream`,
   and `/injstream-ws`.
 - **Multicast** — N clients with the same canonical filter share one
-  upstream connection.
+  upstream connection. Opt-in via `policies.subscriptions.multicast`.
 - **Hash → height memo** — `block_by_hash`, `eth_getBlockByHash`,
   `eth_getTransactionByHash`, etc. go from O(N backends) to O(1) lookups.
 - **Broadcast fan-out** — tx submission is sent to all healthy backends
@@ -127,7 +127,7 @@ curl -s http://127.0.0.1:9091/metrics | grep stitch_
 
 ### From source
 
-Requires Go 1.21+.
+Requires Go 1.25+.
 
 ```bash
 git clone https://github.com/decentrio/stitch
@@ -227,7 +227,17 @@ policies:
     per_attempt_timeout: 5s            # per-upstream deadline
   hedging:
     enabled: true                      # parallel attempt on slow primary
-    methods: [eth_call, abci_query]    # which methods qualify
+                                       # NOTE: hedging currently applies to the EVM
+                                       # JSON-RPC (eth_rpc) listener only; the other
+                                       # listeners (cmt_rpc included) never hedge.
+    methods: [eth_call, eth_estimateGas]   # which methods qualify
+                                       # NOTE: hedging is opt-in twice — a method
+                                       # hedges only if the built-in manifest flags
+                                       # it hedge-safe AND it passes this config.
+                                       # An empty list allows every flagged method.
+                                       # Non-EVM methods (e.g. abci_query) are inert
+                                       # here until their listeners learn to hedge.
+    hedge_after: 200ms                 # delay before the second request (default 200ms)
   circuit:
     error_threshold: 0.5               # 50% failure rate trips
     min_requests: 20                   # over a minimum window of 20 calls
@@ -235,6 +245,9 @@ policies:
   cache:
     enabled: true
     confirmation_depth: 100            # head − N is the cacheable boundary
+    ttl: 5m                            # response-cache entry lifetime (default 5m)
+    hash_index_entries: 100000         # hash → height index capacity (default 100000)
+    response_entries: 50000            # response-cache entry capacity (default 50000)
     l1_size_mb: 1024                   # in-process LRU byte budget
   health:
     probe_interval: 5s                 # how often to probe each backend
@@ -245,9 +258,17 @@ policies:
                                        # appear ~probe_interval × block_rate blocks behind.
                                        # Set this comfortably above that gap, or omit it.
   subscriptions:
-    multicast: true                    # N clients / 1 upstream
-    slow_consumer: drop                # drop | disconnect | backpressure
-    replay_timeout: 30s                # max wait for resume cursor catch-up
+    multicast: true                    # opt-in: /injstream-ws clients with the same
+                                       # canonical filter share 1 upstream (default false)
+    slow_consumer: drop                # multicast fan-out policy when a client's send
+                                       # buffer fills: drop | disconnect | backpressure
+                                       # (backpressure stalls EVERY client subscribed to
+                                       # that filter — the upstream conn is shared)
+    send_buffer: 64                    # per-client fan-out buffer, events (≥ 1; default 64)
+    replay_timeout: 30s                # max time to wait for a dialable upstream during
+                                       # resume before dropping the subscriber/session
+                                       # (omit → 30s; an explicit 0 = a single dial pass
+                                       # per resume)
   dangerous_methods:
     allow:                             # opt-in for debug_*/personal_*/miner_*
       - debug_traceCall
@@ -300,11 +321,32 @@ The client sees a continuous stream — same ID, monotonic cursor, no gap.
 
 ### Multicast (`/injstream-ws`)
 
+Opt-in via `policies.subscriptions.multicast: true` (default off — each
+client gets its own upstream connection).
+
 When 100 clients subscribe to the same filter, stitch canonicalizes the
 filter (sorted keys, sorted string arrays), hashes it, and uses the hash
 as a multicast key. The first client opens an upstream subscription; the
 remaining 99 attach to the same upstream. One TCP connection, fan-out
-to N clients.
+to N clients. A slow client is handled per
+`policies.subscriptions.slow_consumer` over its `send_buffer`-sized
+queue, and on upstream death the shared subscription resumes within
+`replay_timeout` with cursor dedup — no client sees a duplicate.
+
+Subscribe acks are synthesized at attach time: the hub replies
+`"success"` immediately and absorbs the upstream's own ack. A filter the
+upstream later **rejects** therefore still acks "success" — the client
+is then signaled by a WS close (1013, try again later) once the hub
+tears the shared upstream down (a rejected filter is never replayed; it
+would be rejected again forever). Operators: a "success" ack does not
+prove upstream acceptance — watch
+`stitch_subscription_dropped_notifications_total{reason="upstream_reject"}`.
+
+In multicast mode `/injstream-ws` serves **only** `subscribe` /
+`unsubscribe`; any other JSON-RPC frame is answered with a `-32601`
+error instead of per-session passthrough, because there is no per-client
+upstream to forward it to (a dedicated passthrough connection per client
+would defeat the mode).
 
 ### Hash → height memo
 
@@ -323,7 +365,9 @@ decision against the right shard.
 For finalized reads (height ≤ head − confirmation_depth), stitch caches
 the entire response body keyed by `(protocol, method, height, params hash)`.
 The next identical call serves from local memory in ~350 ns with no
-upstream traffic.
+upstream traffic. Entries live for `policies.cache.ttl` (default 5m);
+capacities are bounded by `policies.cache.response_entries` and
+`policies.cache.hash_index_entries`.
 
 ## Operations
 
@@ -341,6 +385,7 @@ The admin listener serves these endpoints (default `127.0.0.1:9091`):
 | POST   | `/admin/backends/{name}/drain`             | remove from selector (in-flight ok)   |
 | POST   | `/admin/backends/{name}/enable`            | undrain                               |
 | GET    | `/admin/cache/stats`                       | hash-index + response-cache sizes     |
+| POST   | `/admin/cache/purge`                       | drop hash-index + response caches     |
 | POST   | `/admin/reload`                            | re-read config; same as SIGHUP        |
 
 Example session:
@@ -370,6 +415,10 @@ The new backend list takes effect for the next request. In-flight requests
 keep their captured snapshot. Drain state persists across reloads — operators
 don't expect "drained" to silently flip back when the file changes.
 
+Only `backends` and `log` apply live. Changes to any other section
+(`listen`, `policies.*`) are ignored until restart, and the reload logs a
+warning naming the ignored sections.
+
 ### Metrics
 
 stitch exposes ~15 Prometheus metric families. Hot ones:
@@ -381,9 +430,11 @@ stitch_backend_health{backend,protocol}                    # 0|1
 stitch_backend_lag_blocks{backend}
 stitch_circuit_state{backend,protocol}                     # 0=closed,1=half,2=open
 stitch_failover_attempts_total{from,to,reason}
-stitch_cache_total{layer,result}                           # hashidx|response, hit|miss|evict|expired
+stitch_cache_total{layer,result}                           # hashidx|response, hit|miss|evict|expired|purge
 stitch_subscriptions_active{protocol,kind}
 stitch_subscription_resumes_total{reason}
+stitch_subscription_dropped_notifications_total{protocol,reason}  # unknown_sub|slow_consumer|upstream_reject
+stitch_relay_truncated_total{backend,protocol}             # upstream died mid-body; client got a partial response
 stitch_broadcast_fanout_total{result}                      # success|partial|total_failure|all_circuited
 stitch_hedge_wins_total{method,winner_index}               # 0|1
 ```
@@ -425,7 +476,7 @@ Validated under chaos:
 | Failover                         | ✗                   | ✗                | ✓          |
 | Circuit breakers                 | ✗                   | ✗                | ✓          |
 | Subscription resume              | ✗                   | ✗                | **✓**      |
-| Multicast (1 upstream / N clients)| ✗                  | ✗                | ✓          |
+| Multicast (1 upstream / N clients)| ✗                  | ✗                | ✓ (opt-in) |
 | Broadcast fan-out                | ✗                   | ✗                | ✓          |
 | Hedging                          | ✗                   | ✗                | ✓          |
 | Hash → height memo               | ✗                   | ✗                | ✓          |
@@ -483,7 +534,8 @@ internal/
 ├── pool                    HTTP transport pool + gRPC ClientConn pool with eviction
 ├── selector                Range-based candidate scoring (specificity + health + lag)
 ├── forwarder               HTTP forwarder with retry, broadcast fan-out, hedging
-├── subscription            Cursor + session + cross-protocol resume + multicast hub
+├── subscription            Session engine + protocol adapters + cursor resume + multicast hub
+├── wsurl                   ws/wss endpoint URL normalization (shared by sessions, hub, prober)
 └── cache                   Hash → height memo + response cache + key + policy
 
 manifests                   per-protocol method manifests (ship embedded)

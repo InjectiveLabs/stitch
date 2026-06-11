@@ -2,20 +2,25 @@
 // query reference §5: a WebSocket endpoint serving subscribe/unsubscribe
 // JSON-RPC over a wrapped ChainStream stream.
 //
-// What this phase does (5c):
+// What it does:
 //
 //   - Accepts WS connections at /injstream-ws (path is hardcoded by the
 //     Injective spec).
-//   - Hands the upgraded connection to a subscription.InjSession which
-//     manages subscribe/unsubscribe lifecycle, mints internal JSON-RPC
-//     ids, and resumes the upstream subscription on backend failure
-//     while keeping client-visible ids stable.
+//   - Default mode: hands the upgraded connection to a
+//     subscription.InjSession which manages subscribe/unsubscribe
+//     lifecycle, mints internal JSON-RPC ids, and resumes the upstream
+//     subscription on backend failure while keeping client-visible ids
+//     stable. Every client gets its own upstream connection.
+//   - Multicast mode (policies.subscriptions.multicast, phase 5b): a
+//     subscription.HubSession routes subscribe/unsubscribe through the
+//     server's shared subscription.Hub, which canonicalizes filter JSON
+//     and coalesces identical subscriptions onto one upstream per
+//     canonical filter. Non-subscribe JSON-RPC frames are answered with
+//     -32601 in this mode — there is no per-client upstream to forward
+//     them to.
 //
 // What is intentionally absent:
 //
-//   - Multicast: every client gets its own upstream connection. Phase
-//     5d will canonicalize filter JSON (sort repeated string slots) and
-//     coalesce identical subscriptions onto a shared upstream.
 //   - Synthetic gap envelope when the new upstream's earliest available
 //     block exceeds the cursor.
 package inj_ws
@@ -31,6 +36,7 @@ import (
 	"github.com/decentrio/stitch/internal/log"
 	"github.com/decentrio/stitch/internal/runtime"
 	"github.com/decentrio/stitch/internal/selector"
+	"github.com/decentrio/stitch/internal/server"
 	"github.com/decentrio/stitch/internal/subscription"
 	"github.com/decentrio/stitch/internal/types"
 )
@@ -46,6 +52,28 @@ type Server struct {
 	upgrader websocket.Upgrader
 	dialer   *websocket.Dialer
 	srv      *http.Server
+	tracker  *server.ConnTracker
+
+	subOpts SubscriptionOptions
+	hub     *subscription.Hub // non-nil iff multicast mode is on
+}
+
+// SubscriptionOptions mirrors policies.subscriptions for this listener.
+type SubscriptionOptions struct {
+	// Multicast coalesces clients with the same canonical filter onto one
+	// shared upstream connection (subscription.Hub). Off by default:
+	// every client gets its own upstream.
+	Multicast bool
+	// SlowConsumer is the hub fan-out policy when a client's send buffer
+	// is full: drop | disconnect | backpressure. Multicast mode only.
+	SlowConsumer string
+	// SendBuffer is the per-subscriber send-channel capacity (multicast
+	// mode only). <= 0 keeps the hub default.
+	SendBuffer int
+	// ReplayTimeout is the max time to wait for a dialable upstream
+	// during resume before dropping the subscriber/session. <= 0 means a
+	// single dial pass per resume. Applies in both modes.
+	ReplayTimeout time.Duration
 }
 
 func New(addr string, sel selector.Selector) *Server {
@@ -62,6 +90,7 @@ func New(addr string, sel selector.Selector) *Server {
 			ReadBufferSize:   4096,
 			WriteBufferSize:  4096,
 		},
+		tracker: server.NewConnTracker(),
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc(EndpointPath, s.serveWS)
@@ -74,6 +103,26 @@ func New(addr string, sel selector.Selector) *Server {
 	return s
 }
 
+// SetSubscriptions installs the subscriptions policy. Call before Start;
+// not safe to call once connections are being served. Multicast mode
+// constructs the server-wide hub here so every session shares it.
+func (s *Server) SetSubscriptions(o SubscriptionOptions) {
+	s.subOpts = o
+	if !o.Multicast {
+		s.hub = nil
+		return
+	}
+	hub := subscription.NewHub(s.selector, s.dialer)
+	if o.SlowConsumer != "" {
+		hub.SlowConsumer = o.SlowConsumer
+	}
+	if o.SendBuffer > 0 {
+		hub.SendBufSize = o.SendBuffer
+	}
+	hub.ReplayTimeout = o.ReplayTimeout
+	s.hub = hub
+}
+
 func (s *Server) Name() string { return "inj_ws" }
 
 func (s *Server) Start(_ context.Context) error {
@@ -84,7 +133,25 @@ func (s *Server) Start(_ context.Context) error {
 	return nil
 }
 
-func (s *Server) Shutdown(ctx context.Context) error { return s.srv.Shutdown(ctx) }
+// Shutdown stops the listener, then force-closes every live WS session
+// and waits — bounded by ctx — for their handlers to return. Closing the
+// client conn is enough: the session's reader errors out and the run
+// loop unwinds through its teardown paths, dropping the upstream dial.
+// In multicast mode the shared hub is shut down after the client sweep
+// (sessions detach their subscribers as they unwind; the hub teardown
+// closes whatever upstreams remain and waits for their goroutines).
+func (s *Server) Shutdown(ctx context.Context) error {
+	err := s.srv.Shutdown(ctx)
+	if sweepErr := s.tracker.SweepAndWait(ctx); sweepErr != nil && err == nil {
+		err = sweepErr
+	}
+	if s.hub != nil {
+		if hubErr := s.hub.Shutdown(ctx); hubErr != nil && err == nil {
+			err = hubErr
+		}
+	}
+	return err
+}
 
 // Handler exposes the underlying handler — used by tests.
 func (s *Server) Handler() http.Handler { return s.srv.Handler }
@@ -111,10 +178,23 @@ func (s *Server) serveWS(w http.ResponseWriter, r *http.Request) {
 		log.FromCtx(ctx).Warn("inj_ws: upgrade failed", "err", err.Error())
 		return
 	}
+	if !s.tracker.Track(clientConn) {
+		_ = clientConn.Close()
+		return
+	}
+	defer s.tracker.Untrack(clientConn)
 
+	if s.hub != nil {
+		sess := subscription.NewHubSession(clientConn, s.hub)
+		if err := sess.Run(ctx); err != nil {
+			log.FromCtx(ctx).Debug("inj_ws: hub session ended", "err", err.Error())
+		}
+		return
+	}
 	sess := subscription.NewInjSession(clientConn, subscription.InjSessionConfig{
-		Selector: s.selector,
-		Dialer:   s.dialer,
+		Selector:      s.selector,
+		Dialer:        s.dialer,
+		ReplayTimeout: s.subOpts.ReplayTimeout,
 	})
 	if err := sess.Run(ctx); err != nil {
 		log.FromCtx(ctx).Debug("inj_ws: session ended", "err", err.Error())

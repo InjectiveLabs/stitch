@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"sync"
 	"time"
 
 	"github.com/decentrio/stitch/internal/backend"
@@ -58,11 +57,14 @@ func (f *HTTP) Broadcast(w http.ResponseWriter, r *http.Request, key types.Route
 	dispatched := 0
 
 	for _, b := range candidates {
-		if !f.circuit.Allow(b.Name, key.Protocol) {
-			continue
-		}
 		ep := b.Endpoint(key.Protocol)
 		if ep == "" {
+			continue
+		}
+		// Acquire, not the read-only Allow: a half-open backend admits at
+		// most one canary, and every dispatched goroutine's outcome is
+		// recorded below, which releases the slot.
+		if !f.circuit.Acquire(b.Name, key.Protocol) {
 			continue
 		}
 		dispatched++
@@ -89,7 +91,16 @@ func (f *HTTP) Broadcast(w http.ResponseWriter, r *http.Request, key types.Route
 			break
 		}
 		failures = append(failures, res)
-		f.circuit.Record(res.backend, key.Protocol, false)
+		// A leg cancelled before any winner exists means the CLIENT went
+		// away; that indicts nobody. Release the admission instead of
+		// recording a failure — the same convention drainResults applies
+		// to post-winner losers. Deadline expiry is NOT cancellation: a
+		// timed-out leg still debits its backend below.
+		if errors.Is(res.err, context.Canceled) {
+			f.circuit.Release(res.backend, key.Protocol)
+		} else {
+			f.circuit.Record(res.backend, key.Protocol, false)
+		}
 	}
 
 	if winner == nil {
@@ -157,15 +168,23 @@ func (f *HTTP) broadcastOne(ctx context.Context, orig *http.Request, ep, backend
 	return out
 }
 
-// drainResults consumes the remaining N results from resCh and records
-// their outcomes against the circuit breaker. Called in a goroutine
-// after a winner has already been declared.
+// drainResults consumes the remaining N results from resCh and resolves
+// their admissions against the circuit breaker. Called in a goroutine
+// after a winner has already been declared. A loser cancelled by the
+// winner's cancel says nothing about its backend: its admission is
+// released, not recorded — recording would re-trip a recovering backend
+// and double its backoff. Legs that never dispatched have no admission to
+// resolve.
 func (f *HTTP) drainResults(resCh <-chan broadcastResult, n int, p types.Protocol) {
 	for i := 0; i < n; i++ {
 		res := <-resCh
-		if res.err != nil || (res.resp != nil && res.resp.StatusCode >= 500) {
+		switch {
+		case errors.Is(res.err, errHedgeLegSkipped):
+		case errors.Is(res.err, context.Canceled):
+			f.circuit.Release(res.backend, p)
+		case res.err != nil || (res.resp != nil && res.resp.StatusCode >= 500):
 			f.circuit.Record(res.backend, p, false)
-		} else {
+		default:
 			f.circuit.Record(res.backend, p, true)
 		}
 	}
@@ -188,7 +207,3 @@ func pickErrReport(failures []broadcastResult) string {
 	}
 	return "all upstream attempts failed"
 }
-
-// Compile-time anchor; keeps the sync import used if drainResults is
-// future-elaborated to track wait groups.
-var _ = sync.Mutex{}

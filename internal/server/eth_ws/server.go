@@ -18,7 +18,6 @@ import (
 	"context"
 	"errors"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -26,6 +25,7 @@ import (
 	"github.com/decentrio/stitch/internal/log"
 	"github.com/decentrio/stitch/internal/runtime"
 	"github.com/decentrio/stitch/internal/selector"
+	"github.com/decentrio/stitch/internal/server"
 	"github.com/decentrio/stitch/internal/subscription"
 	"github.com/decentrio/stitch/internal/types"
 )
@@ -37,6 +37,18 @@ type Server struct {
 	upgrader websocket.Upgrader
 	dialer   *websocket.Dialer
 	srv      *http.Server
+	tracker  *server.ConnTracker
+
+	subOpts SubscriptionOptions
+}
+
+// SubscriptionOptions mirrors the policies.subscriptions knobs this
+// listener consumes.
+type SubscriptionOptions struct {
+	// ReplayTimeout is the max time to wait for a dialable upstream
+	// during resume before terminating the session. <= 0 means a single
+	// dial pass per resume.
+	ReplayTimeout time.Duration
 }
 
 func New(addr string, sel selector.Selector) *Server {
@@ -53,6 +65,7 @@ func New(addr string, sel selector.Selector) *Server {
 			ReadBufferSize:   4096,
 			WriteBufferSize:  4096,
 		},
+		tracker: server.NewConnTracker(),
 	}
 	s.srv = &http.Server{
 		Addr:              addr,
@@ -61,6 +74,9 @@ func New(addr string, sel selector.Selector) *Server {
 	}
 	return s
 }
+
+// SetSubscriptions installs the subscriptions policy. Call before Start.
+func (s *Server) SetSubscriptions(o SubscriptionOptions) { s.subOpts = o }
 
 func (s *Server) Name() string { return "eth_ws" }
 
@@ -72,7 +88,17 @@ func (s *Server) Start(_ context.Context) error {
 	return nil
 }
 
-func (s *Server) Shutdown(ctx context.Context) error { return s.srv.Shutdown(ctx) }
+// Shutdown stops the listener, then force-closes every live WS session
+// and waits — bounded by ctx — for their handlers to return. Closing the
+// client conn is enough: the session's reader errors out and the run
+// loop unwinds through its teardown paths, dropping the upstream dial.
+func (s *Server) Shutdown(ctx context.Context) error {
+	err := s.srv.Shutdown(ctx)
+	if sweepErr := s.tracker.SweepAndWait(ctx); sweepErr != nil && err == nil {
+		err = sweepErr
+	}
+	return err
+}
 
 // Handler returns the underlying http.Handler — useful for tests.
 func (s *Server) Handler() http.Handler { return s.srv.Handler }
@@ -102,28 +128,18 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		log.FromCtx(ctx).Warn("eth_ws: upgrade failed", "err", err.Error())
 		return
 	}
+	if !s.tracker.Track(clientConn) {
+		_ = clientConn.Close()
+		return
+	}
+	defer s.tracker.Untrack(clientConn)
 
 	sess := subscription.NewSession(clientConn, subscription.SessionConfig{
-		Selector: s.selector,
-		Dialer:   s.dialer,
+		Selector:      s.selector,
+		Dialer:        s.dialer,
+		ReplayTimeout: s.subOpts.ReplayTimeout,
 	})
 	if err := sess.Run(ctx); err != nil {
 		log.FromCtx(ctx).Debug("eth_ws: session ended", "err", err.Error())
-	}
-}
-
-// upstreamURL is preserved for the legacy test that asserts URL
-// normalization. Session.normalizeWS is the one that gets used at
-// runtime.
-func upstreamURL(s string) string {
-	switch {
-	case strings.HasPrefix(s, "ws://"), strings.HasPrefix(s, "wss://"):
-		return s
-	case strings.HasPrefix(s, "http://"):
-		return "ws://" + strings.TrimPrefix(s, "http://")
-	case strings.HasPrefix(s, "https://"):
-		return "wss://" + strings.TrimPrefix(s, "https://")
-	default:
-		return s
 	}
 }

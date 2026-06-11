@@ -3,6 +3,7 @@ package health
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -16,21 +17,6 @@ import (
 	"github.com/decentrio/stitch/internal/backend"
 	"github.com/decentrio/stitch/internal/types"
 )
-
-func TestNormalizeWS(t *testing.T) {
-	cases := []struct{ in, want string }{
-		{"ws://example:8546", "ws://example:8546"},
-		{"wss://example:8546", "wss://example:8546"},
-		{"http://example:8546", "ws://example:8546"},
-		{"https://example:8546", "wss://example:8546"},
-		{"example:8546", "example:8546"}, // pass-through for unknown schemes
-	}
-	for _, c := range cases {
-		if got := normalizeWS(c.in); got != c.want {
-			t.Errorf("normalizeWS(%q) = %q, want %q", c.in, got, c.want)
-		}
-	}
-}
 
 // wsBackendMock emulates an eth_ws backend. After ack-ing eth_subscribe,
 // the test drives header emission via emit().
@@ -253,6 +239,258 @@ func TestEthWSProberReconnectAfterDrop(t *testing.T) {
 	}
 
 	cancel()
+}
+
+// TestEthWSProberMarksUnhealthyOnDrop: a dropped stream must write an
+// unhealthy ProtoEthWS snapshot to the registry (not just zero the gauge)
+// so the selector's WS-witness fallback stops routing EVM traffic to the
+// backend; the first head after reconnect flips it back to healthy.
+func TestEthWSProberMarksUnhealthyOnDrop(t *testing.T) {
+	mock := newWSBackendMock(t)
+
+	bs := []*backend.Backend{{
+		Name:      "ws-drop",
+		Endpoints: map[types.Protocol]string{types.ProtoEthWS: mock.URL()},
+	}}
+	reg := backend.NewRegistry(bs)
+	h := NewRegistry()
+	p := NewEthWSProber(reg, h)
+	p.baseBackoff = 50 * time.Millisecond
+	p.maxBackoff = 200 * time.Millisecond
+	p.healthyStreamThreshold = 10 * time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go p.trackOne(ctx, "ws-drop", mock.URL())
+
+	waitForAcks := func(n int64) {
+		t.Helper()
+		deadline := time.After(3 * time.Second)
+		for mock.subAcked.Load() < n {
+			select {
+			case <-deadline:
+				t.Fatalf("expected %d acks, got %d", n, mock.subAcked.Load())
+			case <-time.After(10 * time.Millisecond):
+			}
+		}
+	}
+	waitForSnap := func(label string, cond func(Snapshot) bool) Snapshot {
+		t.Helper()
+		deadline := time.After(3 * time.Second)
+		for {
+			snap, ok := h.Get("ws-drop", types.ProtoEthWS)
+			if ok && cond(snap) {
+				return snap
+			}
+			select {
+			case <-deadline:
+				t.Fatalf("timed out waiting for %s; got ok=%v snap=%+v", label, ok, snap)
+			case <-time.After(10 * time.Millisecond):
+			}
+		}
+	}
+
+	waitForAcks(1)
+	mock.emit(t, 100)
+	waitForSnap("healthy snapshot at 100", func(s Snapshot) bool {
+		return s.Healthy && s.LatestHeight == 100
+	})
+
+	// Drop the stream: the registry must learn about it, with the last
+	// known height carried forward and the drop error recorded.
+	mock.killOldestConn(t)
+	snap := waitForSnap("unhealthy snapshot after drop", func(s Snapshot) bool {
+		return !s.Healthy
+	})
+	if snap.LatestHeight != 100 {
+		t.Errorf("unhealthy snapshot LatestHeight = %d, want 100 (carried forward)", snap.LatestHeight)
+	}
+	if snap.LastError == "" {
+		t.Error("unhealthy snapshot should record the drop error")
+	}
+
+	// Reconnect + next head flips the snapshot back to healthy.
+	waitForAcks(2)
+	mock.emit(t, 150)
+	waitForSnap("healthy snapshot after reconnect", func(s Snapshot) bool {
+		return s.Healthy && s.LatestHeight == 150
+	})
+}
+
+// TestEthWSProberDropAfterPruneDoesNotResurrect: a hot reload pruned the
+// backend while its stream was still up. If the stream then drops naturally
+// in the window before reconcile cancels the tracker, the drop-path
+// bookkeeping must NOT recreate the pruned snapshot or gauge child.
+func TestEthWSProberDropAfterPruneDoesNotResurrect(t *testing.T) {
+	mock := newWSBackendMock(t)
+
+	bs := []*backend.Backend{{
+		Name:      "ws-prune-drop",
+		Endpoints: map[types.Protocol]string{types.ProtoEthWS: mock.URL()},
+	}}
+	reg := backend.NewRegistry(bs)
+	h := NewRegistry()
+	p := NewEthWSProber(reg, h)
+	p.baseBackoff = 20 * time.Millisecond
+	p.maxBackoff = 100 * time.Millisecond
+	p.healthyStreamThreshold = 10 * time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go p.trackOne(ctx, "ws-prune-drop", mock.URL())
+
+	waitForAcks := func(n int64) {
+		t.Helper()
+		deadline := time.After(3 * time.Second)
+		for mock.subAcked.Load() < n {
+			select {
+			case <-deadline:
+				t.Fatalf("expected %d acks, got %d", n, mock.subAcked.Load())
+			case <-time.After(10 * time.Millisecond):
+			}
+		}
+	}
+
+	waitForAcks(1)
+	mock.emit(t, 100)
+	deadline := time.After(2 * time.Second)
+	for {
+		if snap, ok := h.Get("ws-prune-drop", types.ProtoEthWS); ok && snap.LatestHeight == 100 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("initial snapshot never landed")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+
+	// Reload removes the backend, exactly like the reload closure in
+	// cmd/start.go; then the upstream drops the stream naturally.
+	reg.Set(nil)
+	h.Prune(map[string]struct{}{})
+	mock.killOldestConn(t)
+
+	// A reconnect ack proves the drop path has already run.
+	waitForAcks(2)
+	if snap, ok := h.Get("ws-prune-drop", types.ProtoEthWS); ok {
+		t.Errorf("drop path resurrected the pruned snapshot: %+v", snap)
+	}
+	if metricHasBackend(t, "stitch_backend_health", "ws-prune-drop") {
+		t.Error("drop path resurrected the pruned health gauge child")
+	}
+}
+
+// TestEthWSProberStopsPublishingForRemovedBackend covers the reload-prune
+// race: the backend is removed from the registry (and its snapshots pruned)
+// while the head stream is still up. The next pushed head must NOT
+// resurrect the snapshot; the stream loop must exit with errBackendRemoved
+// instead of reconnecting.
+func TestEthWSProberStopsPublishingForRemovedBackend(t *testing.T) {
+	mock := newWSBackendMock(t)
+
+	bs := []*backend.Backend{{
+		Name:      "tip",
+		Endpoints: map[types.Protocol]string{types.ProtoEthWS: mock.URL()},
+	}}
+	reg := backend.NewRegistry(bs)
+	h := NewRegistry()
+	p := NewEthWSProber(reg, h)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- p.subscribeAndStream(ctx, "tip", mock.URL()) }()
+
+	deadline := time.After(2 * time.Second)
+	for mock.subAcked.Load() == 0 {
+		select {
+		case <-deadline:
+			t.Fatal("subscribe never acked")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+
+	// First head lands as a snapshot while the backend is registered.
+	mock.emit(t, 100)
+	deadline = time.After(2 * time.Second)
+	for {
+		if snap, ok := h.Get("tip", types.ProtoEthWS); ok && snap.LatestHeight == 100 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("initial snapshot never landed")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+
+	// Reload removes the backend: registry swap + health prune, exactly
+	// like the reload closure in cmd/start.go.
+	reg.Set(nil)
+	h.Prune(map[string]struct{}{})
+
+	// Push a couple more heads; the prober must bail on the first one
+	// rather than re-publishing.
+	mock.emit(t, 101)
+	select {
+	case err := <-done:
+		if !errors.Is(err, errBackendRemoved) {
+			t.Fatalf("subscribeAndStream returned %v; want errBackendRemoved", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("subscribeAndStream kept streaming after backend removal")
+	}
+
+	if snap, ok := h.Get("tip", types.ProtoEthWS); ok {
+		t.Errorf("pruned snapshot was resurrected: %+v", snap)
+	}
+}
+
+// TestEthWSProberKickReconcilesImmediately verifies the reload nudge: with
+// the refresh ticker effectively disabled, removing the backend and calling
+// Kick must cancel its tracker right away (no reconnect attempts).
+func TestEthWSProberKickReconcilesImmediately(t *testing.T) {
+	mock := newWSBackendMock(t)
+
+	reg := backend.NewRegistry([]*backend.Backend{{
+		Name:      "tip",
+		Endpoints: map[types.Protocol]string{types.ProtoEthWS: mock.URL()},
+	}})
+	h := NewRegistry()
+	p := NewEthWSProber(reg, h)
+	p.refresh = time.Hour // only Kick can trigger a reconcile in this test
+	p.baseBackoff = 20 * time.Millisecond
+	p.maxBackoff = 50 * time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go p.Run(ctx)
+
+	deadline := time.After(2 * time.Second)
+	for mock.subAcked.Load() == 0 {
+		select {
+		case <-deadline:
+			t.Fatal("subscribe never acked")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+
+	// Remove the backend and kick — the tracker's ctx must be cancelled
+	// without waiting for the (hour-long) ticker.
+	reg.Set(nil)
+	p.Kick()
+
+	// The cancelled tracker closes its conn; killing the server side too
+	// must not provoke a reconnect (subAcked stays put).
+	time.Sleep(100 * time.Millisecond)
+	mock.killOldestConn(t)
+	start := mock.subAcked.Load()
+	time.Sleep(300 * time.Millisecond)
+	if got := mock.subAcked.Load(); got > start {
+		t.Errorf("tracker reconnected after kick-driven removal: acks %d -> %d", start, got)
+	}
 }
 
 func TestEthWSProberBackendChurn(t *testing.T) {

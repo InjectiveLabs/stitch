@@ -2,7 +2,6 @@ package admin
 
 import (
 	"encoding/json"
-	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -12,7 +11,6 @@ import (
 	"github.com/decentrio/stitch/internal/circuit"
 	"github.com/decentrio/stitch/internal/health"
 	"github.com/decentrio/stitch/internal/log"
-	"github.com/decentrio/stitch/internal/types"
 )
 
 // Deps bundles the in-process state the admin endpoints inspect or mutate.
@@ -48,16 +46,16 @@ func (s *Server) installAdminRoutes(mux *http.ServeMux) {
 // ----- handlers -----------------------------------------------------------
 
 type backendStatus struct {
-	Name         string                  `json:"name"`
-	Coverage     coverageView            `json:"coverage"`
-	Weight       int                     `json:"weight"`
-	Tags         []string                `json:"tags,omitempty"`
-	Endpoints    map[string]string       `json:"endpoints"`
-	Health       map[string]bool         `json:"health"`
-	Circuit      map[string]string       `json:"circuit"`
-	LatestHeight int64                   `json:"latest_height,omitempty"`
-	Lag          int64                   `json:"lag"`
-	Drained      bool                    `json:"drained"`
+	Name         string            `json:"name"`
+	Coverage     coverageView      `json:"coverage"`
+	Weight       int               `json:"weight"`
+	Tags         []string          `json:"tags,omitempty"`
+	Endpoints    map[string]string `json:"endpoints"`
+	Health       map[string]bool   `json:"health"`
+	Circuit      map[string]string `json:"circuit"`
+	LatestHeight int64             `json:"latest_height,omitempty"`
+	Lag          int64             `json:"lag"`
+	Drained      bool              `json:"drained"`
 }
 
 type coverageView struct {
@@ -225,23 +223,28 @@ func (s *Server) handleCacheStats(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
+type purgeResult struct {
+	HashIndexPurged int `json:"hash_index_purged"`
+	ResponsePurged  int `json:"response_purged"`
+}
+
 func (s *Server) handleCachePurge(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeJSONError(w, http.StatusMethodNotAllowed, "POST required")
 		return
 	}
-	// HashIndex doesn't have a Purge — re-create by emptying through
-	// repeated Set+Capacity? Simpler: skip, since restart purges. For now
-	// expose only the response cache size; admin can wait for TTL on the
-	// hash index. (Phase 9 may add a real Purge method.)
-	if s.deps.RespCache != nil {
-		// We don't currently have a bulk purge on ResponseCache. Approximate
-		// by leaving entries to TTL-expire; document limitation.
+	out := purgeResult{}
+	if s.deps.HashCache != nil {
+		out.HashIndexPurged = s.deps.HashCache.Purge()
 	}
-	writeJSON(w, http.StatusOK, map[string]string{
-		"status": "noop",
-		"note":   "Bulk cache purge is not yet implemented; restart stitch or wait for TTL expiry.",
-	})
+	if s.deps.RespCache != nil {
+		out.ResponsePurged = s.deps.RespCache.Purge()
+	}
+	log.L().Info("admin: caches purged",
+		"hash_index", out.HashIndexPurged,
+		"response", out.ResponsePurged,
+	)
+	writeJSON(w, http.StatusOK, out)
 }
 
 // ----- reload -------------------------------------------------------------
@@ -279,7 +282,3 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 func writeJSONError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
 }
-
-// silence unused-import warnings if downstream stops referencing
-var _ = errors.New
-var _ types.Protocol = ""

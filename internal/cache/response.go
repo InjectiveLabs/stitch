@@ -46,27 +46,37 @@ func NewResponseCache(opts ResponseCacheOpts) *ResponseCache {
 	}
 }
 
-// Get returns the cached body or (nil, false). Expired entries are
-// pruned on access. On hit, the entry moves to the front of the LRU.
+// Get returns a copy of the cached body or (nil, false). Expired entries
+// are pruned on access. On hit, the entry moves to the front of the LRU.
+// Callers may mutate the returned slice freely.
+//
+// The copy happens OUTSIDE the critical section so a large body doesn't
+// serialize every other cache user behind a memcpy. That is safe because
+// stored bodies are immutable: Set always copies in, and overwriting a
+// key swaps the entry's slice rather than writing through it, so a slice
+// captured under the lock can never be concurrently modified.
 func (c *ResponseCache) Get(key string) ([]byte, bool) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	elem, ok := c.entries[key]
 	if !ok {
+		c.mu.Unlock()
 		metrics.CacheTotal.WithLabelValues("response", "miss").Inc()
 		return nil, false
 	}
 	e := elem.Value.(*cacheEntry)
 	if !e.expires.IsZero() && time.Now().After(e.expires) {
 		c.removeElement(elem)
+		c.mu.Unlock()
 		metrics.CacheTotal.WithLabelValues("response", "expired").Inc()
 		return nil, false
 	}
 	c.order.MoveToFront(elem)
+	body := e.body
+	c.mu.Unlock()
+
 	metrics.CacheTotal.WithLabelValues("response", "hit").Inc()
-	// Return a copy so callers can mutate without racing other readers.
-	out := make([]byte, len(e.body))
-	copy(out, e.body)
+	out := make([]byte, len(body))
+	copy(out, body)
 	return out, true
 }
 
@@ -113,6 +123,19 @@ func (c *ResponseCache) Delete(key string) {
 	if elem, ok := c.entries[key]; ok {
 		c.removeElement(elem)
 	}
+}
+
+// Purge drops every entry, resets byte accounting, and returns how many
+// entries were removed.
+func (c *ResponseCache) Purge() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	n := c.order.Len()
+	c.entries = make(map[string]*list.Element)
+	c.order.Init()
+	c.bytesIn = 0
+	metrics.CacheTotal.WithLabelValues("response", "purge").Add(float64(n))
+	return n
 }
 
 // Size returns the current entry count.

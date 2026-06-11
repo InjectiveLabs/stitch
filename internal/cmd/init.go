@@ -38,7 +38,9 @@ policies:
     probe_interval: 5s
     max_lag_blocks: 50          # gap allowance vs. observed head (see README)
   subscriptions:
-    multicast: true
+    # opt-in: N clients with the same filter share one upstream; non-subscribe
+    # frames are rejected in this mode — see README
+    multicast: false
     slow_consumer: drop
     replay_timeout: 30s
 

@@ -110,6 +110,9 @@ func validatePolicies(p PoliciesConfig) error {
 	if p.Failover.PerAttemptTimeout <= 0 {
 		return errors.New("policies.failover.per_attempt_timeout must be > 0")
 	}
+	if p.Hedging.Enabled && p.Hedging.HedgeAfter <= 0 {
+		return errors.New("policies.hedging.hedge_after must be > 0 when hedging is enabled")
+	}
 	if p.Circuit.ErrorThreshold <= 0 || p.Circuit.ErrorThreshold > 1 {
 		return errors.New("policies.circuit.error_threshold must be in (0, 1]")
 	}
@@ -129,6 +132,30 @@ func validatePolicies(p PoliciesConfig) error {
 	case "", "drop", "disconnect", "backpressure":
 	default:
 		return fmt.Errorf("policies.subscriptions.slow_consumer=%q (allowed: drop|disconnect|backpressure)", p.Subscriptions.SlowConsumer)
+	}
+	// A configured send_buffer must be ≥ 1 — an unbuffered fan-out channel
+	// would stall the hub on every notification. Zero means "unset" here
+	// (Load's defaults turn it into 64 before validation runs).
+	if p.Subscriptions.SendBuffer < 0 {
+		return errors.New("policies.subscriptions.send_buffer must be ≥ 1")
+	}
+	// nil = absent (defaulted to 30s before validation runs); an explicit
+	// 0 is valid and means a single dial pass per resume.
+	if p.Subscriptions.ReplayTimeout != nil && *p.Subscriptions.ReplayTimeout < 0 {
+		return errors.New("policies.subscriptions.replay_timeout must be ≥ 0; 0 = single dial pass per resume")
+	}
+	if p.Cache.Enabled && p.Cache.TTL <= 0 {
+		return errors.New("policies.cache.ttl must be > 0 when cache is enabled")
+	}
+	// The hash index and the response cache are built unconditionally at
+	// startup (hash→height routing works even with response caching off),
+	// so their capacities must be sane regardless of cache.enabled — a
+	// value < 1 would build an unbounded structure.
+	if p.Cache.HashIndexEntries < 1 {
+		return errors.New("policies.cache.hash_index_entries must be ≥ 1")
+	}
+	if p.Cache.ResponseEntries < 1 {
+		return errors.New("policies.cache.response_entries must be ≥ 1")
 	}
 	switch p.Cache.L2Kind {
 	case "", "none", "redis":

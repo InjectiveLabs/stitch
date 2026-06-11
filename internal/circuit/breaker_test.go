@@ -1,6 +1,8 @@
 package circuit
 
 import (
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -41,7 +43,10 @@ func TestBreakerHalfOpenThenClose(t *testing.T) {
 	}
 	time.Sleep(15 * time.Millisecond)
 	if !b.Allow() {
-		t.Fatal("Allow() should return true after cooldown (half-open)")
+		t.Fatal("Allow() should return true after cooldown")
+	}
+	if !b.Acquire() {
+		t.Fatal("Acquire() should claim the canary after cooldown")
 	}
 	if b.State() != StateHalfOpen {
 		t.Fatalf("expected half_open, got %s", b.State())
@@ -63,11 +68,269 @@ func TestBreakerHalfOpenFailureBacksOff(t *testing.T) {
 		b.Record(false)
 	}
 	time.Sleep(8 * time.Millisecond)
-	if !b.Allow() {
+	if !b.Acquire() {
 		t.Fatal("first cooldown should expire")
 	}
 	b.Record(false) // canary fails
 	if b.State() != StateOpen {
 		t.Fatalf("expected re-open, got %s", b.State())
+	}
+	if got, want := b.openedBackoff.Load(), (10 * time.Millisecond).Nanoseconds(); got != want {
+		t.Errorf("failed canary should double the cooldown: got %dns want %dns", got, want)
+	}
+}
+
+// Allow must stay side-effect-free: the selector calls it to filter
+// candidates and must never consume the canary slot or transition state.
+func TestBreakerAllowIsReadOnly(t *testing.T) {
+	b := NewBreaker(Policy{
+		ErrorThreshold: 0.5,
+		MinRequests:    4,
+		OpenDuration:   10 * time.Millisecond,
+		WindowSize:     8,
+	})
+	for i := 0; i < 4; i++ {
+		b.Record(false)
+	}
+	time.Sleep(15 * time.Millisecond)
+	for i := 0; i < 3; i++ {
+		if !b.Allow() {
+			t.Fatal("Allow() should return true once the cooldown elapsed")
+		}
+	}
+	if b.State() != StateOpen {
+		t.Fatalf("Allow() must not transition state; got %s", b.State())
+	}
+	if b.canary.Load() {
+		t.Fatal("Allow() must not claim the canary slot")
+	}
+}
+
+// Exactly one of N concurrent Acquire calls may win the half-open canary.
+func TestBreakerSingleCanary(t *testing.T) {
+	b := NewBreaker(Policy{
+		ErrorThreshold: 0.5,
+		MinRequests:    4,
+		OpenDuration:   10 * time.Millisecond,
+		WindowSize:     8,
+	})
+	for i := 0; i < 4; i++ {
+		b.Record(false)
+	}
+	time.Sleep(15 * time.Millisecond)
+
+	var admitted atomic.Int32
+	var wg sync.WaitGroup
+	for i := 0; i < 32; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if b.Acquire() {
+				admitted.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+	if admitted.Load() != 1 {
+		t.Fatalf("expected exactly 1 canary admitted, got %d", admitted.Load())
+	}
+	if b.State() != StateHalfOpen {
+		t.Fatalf("expected half_open, got %s", b.State())
+	}
+	if b.Allow() {
+		t.Fatal("Allow() should report false while the canary slot is taken")
+	}
+}
+
+// A resolved canary — success or failure — releases the slot.
+func TestBreakerCanaryReleasedOnResolve(t *testing.T) {
+	pol := Policy{
+		ErrorThreshold: 0.5,
+		MinRequests:    4,
+		OpenDuration:   10 * time.Millisecond,
+		WindowSize:     8,
+	}
+
+	// Success: half-open → closed, slot free, backoff reset.
+	b := NewBreaker(pol)
+	for i := 0; i < 4; i++ {
+		b.Record(false)
+	}
+	time.Sleep(15 * time.Millisecond)
+	if !b.Acquire() {
+		t.Fatal("canary should be admitted")
+	}
+	b.Record(true)
+	if b.State() != StateClosed {
+		t.Fatalf("expected closed, got %s", b.State())
+	}
+	if b.canary.Load() {
+		t.Fatal("slot should be released on success")
+	}
+	if b.openedBackoff.Load() != 0 {
+		t.Fatal("backoff should reset on close")
+	}
+	if !b.Acquire() {
+		t.Fatal("closed breaker should admit freely")
+	}
+
+	// Failure: half-open → open, slot free, next canary admitted after the
+	// (doubled) cooldown.
+	b = NewBreaker(pol)
+	for i := 0; i < 4; i++ {
+		b.Record(false)
+	}
+	time.Sleep(15 * time.Millisecond)
+	if !b.Acquire() {
+		t.Fatal("canary should be admitted")
+	}
+	b.Record(false)
+	if b.State() != StateOpen {
+		t.Fatalf("expected open, got %s", b.State())
+	}
+	if b.canary.Load() {
+		t.Fatal("slot should be released on failure")
+	}
+	// Assert the doubled cooldown by value, not with a wall-clock Acquire
+	// probe: on a loaded machine the 20ms window may already have elapsed.
+	if got, want := b.openedBackoff.Load(), (20 * time.Millisecond).Nanoseconds(); got != want {
+		t.Errorf("failed canary should double the cooldown: got %dns want %dns", got, want)
+	}
+	time.Sleep(25 * time.Millisecond) // doubled cooldown = 20ms
+	if !b.Acquire() {
+		t.Fatal("next canary should be admitted after the doubled cooldown")
+	}
+}
+
+// Release abandons an admission without an outcome: the canary slot is
+// freed, the state stays half-open, and no sample is recorded.
+func TestBreakerReleaseFreesCanaryWithoutSample(t *testing.T) {
+	b := NewBreaker(Policy{
+		ErrorThreshold: 0.5,
+		MinRequests:    4,
+		OpenDuration:   10 * time.Millisecond,
+		WindowSize:     8,
+	})
+	for i := 0; i < 4; i++ {
+		b.Record(false)
+	}
+	time.Sleep(15 * time.Millisecond)
+	if !b.Acquire() {
+		t.Fatal("canary should be admitted after cooldown")
+	}
+	if b.State() != StateHalfOpen {
+		t.Fatalf("expected half_open, got %s", b.State())
+	}
+
+	countBefore := b.count
+	b.Release()
+	if b.State() != StateHalfOpen {
+		t.Fatalf("Release must not transition state; got %s", b.State())
+	}
+	if b.canary.Load() {
+		t.Fatal("Release must free the canary slot")
+	}
+	if b.count != countBefore {
+		t.Fatalf("Release must not record a sample: count %d → %d", countBefore, b.count)
+	}
+	if !b.Acquire() {
+		t.Fatal("released slot should be claimable again")
+	}
+	b.Record(true)
+	if b.State() != StateClosed {
+		t.Fatalf("expected closed after the re-acquired canary succeeds, got %s", b.State())
+	}
+
+	// No-op on a closed breaker with no claimed slot.
+	b.Release()
+	if b.State() != StateClosed {
+		t.Fatalf("Release on closed must be a no-op; got %s", b.State())
+	}
+	if !b.Acquire() {
+		t.Fatal("closed breaker should still admit freely")
+	}
+}
+
+// Concurrent failure records must produce exactly one trip: backoff stays at
+// the base OpenDuration and openedAt is not clobbered by a second trip.
+func TestBreakerConcurrentFailuresTripOnce(t *testing.T) {
+	b := NewBreaker(Policy{
+		ErrorThreshold: 0.5,
+		MinRequests:    4,
+		OpenDuration:   time.Minute,
+		WindowSize:     64,
+	})
+	var wg sync.WaitGroup
+	for i := 0; i < 64; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			b.Record(false)
+		}()
+	}
+	wg.Wait()
+	if b.State() != StateOpen {
+		t.Fatalf("expected open, got %s", b.State())
+	}
+	if got, want := b.openedBackoff.Load(), time.Minute.Nanoseconds(); got != want {
+		t.Errorf("concurrent records doubled the backoff: got %dns want %dns", got, want)
+	}
+}
+
+// Outcomes of requests dispatched before a trip arrive while the breaker
+// is open: they are samples only, whether the cooldown is still running or
+// has already elapsed. Open-state resolution belongs exclusively to
+// canaries admitted via Acquire — an un-admitted stale outcome must
+// neither close nor re-trip the breaker.
+func TestBreakerLateRecordWhileOpenIsIgnored(t *testing.T) {
+	b := NewBreaker(Policy{
+		ErrorThreshold: 0.5,
+		MinRequests:    4,
+		OpenDuration:   time.Minute,
+		WindowSize:     8,
+	})
+	for i := 0; i < 4; i++ {
+		b.Record(false)
+	}
+	b.Record(true)
+	if b.State() != StateOpen {
+		t.Fatalf("late success must not close an open breaker; got %s", b.State())
+	}
+
+	// After the cooldown elapsed: still samples only.
+	pol := Policy{
+		ErrorThreshold: 0.5,
+		MinRequests:    4,
+		OpenDuration:   10 * time.Millisecond,
+		WindowSize:     8,
+	}
+	b = NewBreaker(pol)
+	for i := 0; i < 4; i++ {
+		b.Record(false)
+	}
+	time.Sleep(15 * time.Millisecond)
+	if !b.Allow() {
+		t.Fatal("cooldown should have elapsed")
+	}
+	b.Record(true)
+	if b.State() != StateOpen {
+		t.Fatalf("un-admitted post-cooldown success must not close; got %s", b.State())
+	}
+	b.Record(false)
+	if b.State() != StateOpen {
+		t.Fatalf("un-admitted post-cooldown failure must keep state open; got %s", b.State())
+	}
+	if got, want := b.openedBackoff.Load(), pol.OpenDuration.Nanoseconds(); got != want {
+		t.Errorf("un-admitted post-cooldown failure must not re-trip/double the cooldown: got %dns want %dns", got, want)
+	}
+
+	// The breaker still recovers through the front door: an Acquired
+	// canary resolves it.
+	if !b.Acquire() {
+		t.Fatal("canary should be admitted after the cooldown")
+	}
+	b.Record(true)
+	if b.State() != StateClosed {
+		t.Fatalf("canary success should close; got %s", b.State())
 	}
 }

@@ -7,6 +7,124 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Added
+
+- `/injstream-ws` multicast is now actually wired, behind
+  `policies.subscriptions.multicast` (default **false**). It was advertised
+  in the README and parsed from config, but the multicast hub had zero
+  production callers — every client always got its own upstream connection.
+  With the flag on, clients whose filters share a canonical key share one
+  upstream; the shared subscription resumes across backend failure with
+  cursor dedup. **In multicast mode, non-`subscribe`/`unsubscribe` JSON-RPC
+  frames on `/injstream-ws` are rejected with a `-32601` error instead of
+  per-session passthrough** (there is no per-client upstream to forward
+  them to). Subscribe acks are synthesized at attach time; if the upstream
+  rejects the shared subscribe (JSON-RPC error), the hub tears that
+  upstream down and the attached clients are closed with WS 1013 — the
+  rejected filter is never replayed — counted in
+  `stitch_subscription_dropped_notifications_total{reason="upstream_reject"}`.
+- The rest of `policies.subscriptions` is now real (previously parsed but
+  consumed by nothing): `slow_consumer` governs the multicast fan-out
+  policy per client (`drop` | `disconnect` | `backpressure`; drops are
+  counted in `stitch_subscription_dropped_notifications_total{reason=
+  "slow_consumer"}`), the new `send_buffer` knob sizes the per-client
+  fan-out queue (default 64), and `replay_timeout` is the max time a
+  resume keeps re-dialing for an upstream (250ms→2s backoff between
+  passes) before the session/subscriber is dropped — omitted it defaults
+  to 30s, while an explicit `0` keeps the previous single-pass behavior
+  (one dial pass per resume); negative values are rejected at load.
+- `policies.cache.ttl`, `policies.cache.hash_index_entries`, and
+  `policies.cache.response_entries` are now wired: they size the hash→height
+  index and the response cache and set the response-entry lifetime
+  (previously parsed but ignored). `policies.hedging.hedge_after` likewise
+  controls the hedge delay for real.
+- Hot reload now warns about edited config sections that only apply at
+  startup (`listen`, `policies.*`), diffed against the **boot** config so
+  the warning repeats on every reload while the file diverges and stays
+  silent when it reverts.
+- Hot reload prunes health snapshots, circuit breakers, and their
+  per-backend metric gauge children for backends the new config no longer
+  declares; in-flight probes and the eth_ws head tracker can no longer
+  resurrect a pruned backend. Cumulative counters (`stitch_requests_total`
+  etc.) are deliberately retained as history.
+- `POST /admin/cache/purge` actually purges both caches and reports per-cache
+  purged-entry counts (was a stub that purged nothing); purges are counted in
+  `stitch_cache_total{result="purge"}`.
+
+### Removed
+
+- `policies.hedging.after_pct_of_p95` — the knob was never wired to
+  anything. Config parsing is strict, so configs still setting it will now
+  fail to load; delete the line (use `hedge_after` for the hedge delay).
+- `policies.hedging.max_hedge` — likewise declared but read by nothing.
+  Strict parsing now rejects configs still setting it; delete the line.
+
+### Fixed
+
+- Circuit accounting now reflects what clients actually experienced: an
+  upstream HTTP 500 relayed to the client records a circuit failure
+  (previously counted as success), a response truncated mid-body by the
+  upstream records a failure and increments the new
+  `stitch_relay_truncated_total{backend,protocol}` counter, and a client
+  disconnecting mid-attempt releases the attempt without debiting the
+  backend. Half-open circuits admit exactly one canary request at a time
+  (previously unlimited concurrent canaries could pile onto a recovering
+  backend).
+- Live WebSocket sessions (eth_ws and `/injstream-ws`) are closed during
+  graceful shutdown — `http.Server.Shutdown` neither waits for nor closes
+  hijacked connections, so live clients previously kept their sessions (and
+  upstream dials) past the drain. Upstream notifications that match no live
+  subscription are now counted in the new
+  `stitch_subscription_dropped_notifications_total{protocol,reason}` family
+  instead of vanishing silently.
+- A flapping ChainStream upstream is now re-dialed with jittered
+  exponential backoff (250ms doubling to a 5s cap, ±20% jitter) between
+  resume attempts; previously all 8 attempts fired back-to-back, hammering
+  a struggling backend with instant reconnects. The 8-attempt budget now
+  spans roughly 30s worst case, and a resume prefers a different upstream
+  over the one whose stream just dropped when an alternative is viable.
+- `stitch init` wrote a starter config with `multicast: true`; it now ships
+  `false`, matching the conservative example-config defaults (the feature
+  is opt-in) — a prior pass flipped the examples but missed the starter
+  template.
+- WS subscription upstreams (eth_ws and `/injstream-ws` sessions, and the
+  multicast hub) now send keepalive pings every 20s; previously a quiet
+  stream hit the 60s read deadline and silently churned through a resume
+  — and under multicast that hiccup would have hit every attached client
+  at once.
+- EVM-only backends (no CometBFT `rpc` endpoint) are now health-gated via
+  their `eth_ws` head stream; a dropped stream marks the backend unhealthy
+  for EVM/stream routing until it reconnects. Previously such backends were
+  optimistically healthy forever.
+- Graceful shutdown returns as soon as every listener has drained instead of
+  always blocking for the full `--shutdown-grace` window; per-server drain
+  timings are logged, and servers still draining at the deadline are named.
+- A listener failing to start (e.g. a port conflict) now drains its peers
+  instead of leaving them running with signal handling disabled — previously
+  the process could only be stopped with SIGKILL.
+
+### Changed
+
+- Circuit-breaker half-open admission now applies to the Cosmos gRPC and
+  ChainStream proxies too: their directors claim an admission before
+  committing to a backend, so a recovering backend receives exactly one
+  probe at a time across every protocol instead of an unbounded burst of
+  concurrently allowed calls; a client that disconnects mid-call releases
+  the admission without debiting the backend. With every caller on the
+  admission path, a stale pre-trip outcome arriving after the breaker
+  tripped and cooled down no longer closes or re-trips the circuit.
+- **BEHAVIOR**: hedging is now genuinely config-gated. Configs without
+  `policies.hedging.enabled: true` no longer hedge at all; previously the
+  manifest's hedge-safe flag alone enabled hedging on the EVM JSON-RPC
+  listener regardless of config. Hedging still applies to the eth_rpc
+  listener only.
+- Bounded-coverage backends are verified once at startup (with retry) instead
+  of being probed every `probe_interval`; their coverage is static, so
+  periodic `/status` polls were wasted work.
+- CI runs on pushes to `master` (the actual default branch) and tests
+  Go 1.25 + stable, matching the `go.mod` directive. README now states the
+  real minimum (Go 1.25+).
+
 ## [0.1.0] — initial release
 
 First public cut. Stitch fronts an arbitrary number of upstream Cosmos /

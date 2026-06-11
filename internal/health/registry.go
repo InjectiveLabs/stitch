@@ -7,6 +7,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+
+	"github.com/decentrio/stitch/internal/metrics"
 	"github.com/decentrio/stitch/internal/types"
 )
 
@@ -75,6 +78,39 @@ func (r *Registry) Get(backend string, p types.Protocol) (Snapshot, bool) {
 		return Snapshot{}, false
 	}
 	return *v, true
+}
+
+// Prune drops snapshots for backends not present in the active set (e.g.
+// removed by a hot reload) and best-effort deletes their per-backend
+// metric children so dashboards don't show ghosts. Taking a plain set
+// rather than a callback keeps arbitrary caller code from running under
+// r.mu (a re-entrant callback would deadlock).
+//
+// MaxHead is deliberately left untouched: it tracks the monotonic chain
+// head, so a maximum learned from a since-removed backend is still a
+// valid head observation; shrinking it would make lag and pruned-coverage
+// math jump backwards for no benefit.
+func (r *Registry) Prune(active map[string]struct{}) {
+	r.mu.Lock()
+	old := *r.snapshots.Load()
+	cp := make(map[key]*Snapshot, len(old))
+	removed := map[string]struct{}{}
+	for k, v := range old {
+		if _, ok := active[k.backend]; ok {
+			cp[k] = v
+		} else {
+			removed[k.backend] = struct{}{}
+		}
+	}
+	r.snapshots.Store(&cp)
+	r.mu.Unlock()
+
+	for name := range removed {
+		labels := prometheus.Labels{"backend": name}
+		metrics.BackendHealth.DeletePartialMatch(labels)
+		metrics.BackendLagBlocks.DeletePartialMatch(labels)
+		metrics.BackendLatency.DeletePartialMatch(labels)
+	}
 }
 
 // MaxHead returns the highest known head across all backends. Used as a

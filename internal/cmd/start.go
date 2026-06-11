@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"runtime"
+	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -20,8 +21,8 @@ import (
 	"github.com/decentrio/stitch/internal/pool"
 	"github.com/decentrio/stitch/internal/selector"
 	"github.com/decentrio/stitch/internal/server"
-	"github.com/decentrio/stitch/internal/server/cmt_rpc"
 	"github.com/decentrio/stitch/internal/server/chainstream"
+	"github.com/decentrio/stitch/internal/server/cmt_rpc"
 	"github.com/decentrio/stitch/internal/server/cosmos_grpc"
 	"github.com/decentrio/stitch/internal/server/cosmos_rest"
 	"github.com/decentrio/stitch/internal/server/eth_rpc"
@@ -63,16 +64,16 @@ func startCmd() *cobra.Command {
 			selCore := selector.NewRangeSelector(reg, h, cmgr, cfg.Policies.Health.MaxLagBlocks)
 			httpPool := pool.NewHTTPPool()
 			grpcPool := pool.NewGRPCPool(5 * time.Minute)
-			hashIdx := cache.New(100_000)
+			hashIdx := cache.New(cfg.Policies.Cache.HashIndexEntries)
 			respCache := cache.NewResponseCache(cache.ResponseCacheOpts{
-				Capacity: 50_000,
+				Capacity: cfg.Policies.Cache.ResponseEntries,
 				MaxBytes: int64(cfg.Policies.Cache.L1SizeMB) * 1024 * 1024,
 			})
 			headFn := func() int64 { return h.MaxHead() }
 			fwd := forwarder.NewHTTP(selCore, httpPool, cmgr, forwarder.Policy{
 				MaxAttempts:       cfg.Policies.Failover.MaxAttempts,
 				PerAttemptTimeout: cfg.Policies.Failover.PerAttemptTimeout,
-				HedgeAfter:        200 * time.Millisecond,
+				HedgeAfter:        cfg.Policies.Hedging.HedgeAfter,
 			})
 			grpcDirector := cosmos_grpc.NewDirector(selCore, cmgr, grpcPool)
 
@@ -86,11 +87,13 @@ func startCmd() *cobra.Command {
 			defer cancel()
 
 			// Start health probers as goroutines (not as managed servers; they
-			// have no listen socket).
+			// have no listen socket). The eth_ws prober keeps a handle so the
+			// reload path can kick an immediate reconcile after pruning.
+			ethWSProber := health.NewEthWSProber(reg, h)
 			go health.NewRPCProber(reg, h, cfg.Policies.Health.ProbeInterval).Run(ctx)
 			go health.NewRESTProber(reg, h, cfg.Policies.Health.ProbeInterval).Run(ctx)
 			go health.NewGRPCProber(reg, grpcPool, h, cfg.Policies.Health.ProbeInterval).Run(ctx)
-			go health.NewEthWSProber(reg, h).Run(ctx)
+			go ethWSProber.Run(ctx)
 			go health.NewBoundedVerifier(reg, h).Run(ctx)
 			go grpcPool.RunEvictor(ctx, time.Minute)
 
@@ -109,7 +112,7 @@ func startCmd() *cobra.Command {
 				cmtSrv := cmt_rpc.New(cfg.Listen.RPC.Addr, fwd)
 				cmtSrv.SetHashCache(hashIdx)
 				if cfg.Policies.Cache.Enabled {
-					cmtSrv.SetResponseCache(respCache, headFn, cfg.Policies.Cache.ConfirmationDepth)
+					cmtSrv.SetResponseCache(respCache, headFn, cfg.Policies.Cache.ConfirmationDepth, cfg.Policies.Cache.TTL)
 				}
 				mgr.Add(cmtSrv)
 			}
@@ -127,13 +130,20 @@ func startCmd() *cobra.Command {
 				ethSrv := eth_rpc.New(cfg.Listen.EthRPC.Addr, fwd)
 				ethSrv.SetHashCache(hashIdx)
 				if cfg.Policies.Cache.Enabled {
-					ethSrv.SetResponseCache(respCache, headFn, cfg.Policies.Cache.ConfirmationDepth)
+					ethSrv.SetResponseCache(respCache, headFn, cfg.Policies.Cache.ConfirmationDepth, cfg.Policies.Cache.TTL)
 				}
+				ethSrv.SetHedging(cfg.Policies.Hedging.Enabled, cfg.Policies.Hedging.Methods)
 				ethSrv.SetDangerousAllowlist(eth_rpc.NewDangerousAllowlist(cfg.Policies.DangerousMethods.Allow))
 				mgr.Add(ethSrv)
 			}
 			if cfg.Listen.EthWS.Enabled() {
-				mgr.Add(eth_ws.New(cfg.Listen.EthWS.Addr, selCore))
+				ethWS := eth_ws.New(cfg.Listen.EthWS.Addr, selCore)
+				ethWS.SetSubscriptions(eth_ws.SubscriptionOptions{
+					// Non-nil after config.Load's applyDefaults; an explicit
+					// 0 means a single dial pass per resume.
+					ReplayTimeout: *cfg.Policies.Subscriptions.ReplayTimeout,
+				})
+				mgr.Add(ethWS)
 			}
 			if cfg.Listen.ChainStream.Enabled() {
 				cs, err := chainstream.New(cfg.Listen.ChainStream.Addr, selCore, cmgr, grpcPool)
@@ -143,19 +153,59 @@ func startCmd() *cobra.Command {
 				mgr.Add(cs)
 			}
 			if cfg.Listen.InjWS.Enabled() {
-				mgr.Add(inj_ws.New(cfg.Listen.InjWS.Addr, selCore))
+				injWS := inj_ws.New(cfg.Listen.InjWS.Addr, selCore)
+				injWS.SetSubscriptions(inj_ws.SubscriptionOptions{
+					Multicast:    cfg.Policies.Subscriptions.Multicast,
+					SlowConsumer: cfg.Policies.Subscriptions.SlowConsumer,
+					SendBuffer:   cfg.Policies.Subscriptions.SendBuffer,
+					// Non-nil after config.Load's applyDefaults; an explicit
+					// 0 means a single dial pass per resume.
+					ReplayTimeout: *cfg.Policies.Subscriptions.ReplayTimeout,
+				})
+				mgr.Add(injWS)
 			}
 
+			// Non-reloadable sections keep running with the BOOT config no
+			// matter how many reloads happen, so the "ignored until restart"
+			// warning must always diff against the config the process started
+			// with — not the last-loaded one (which would warn only once and
+			// false-warn when a file reverts to boot values).
+			bootCfg := cfg
+			// reload's multi-step body (load, swap, prune, kick) must not
+			// interleave: SIGHUP and POST /admin/reload can fire concurrently.
+			var reloadMu sync.Mutex
 			reload := func() error {
+				reloadMu.Lock()
+				defer reloadMu.Unlock()
 				next, err := config.Load(configPath)
 				if err != nil {
 					return err
 				}
-				holder.Swap(next)
-				if newBackends, err := backend.FromConfig(next.Backends); err == nil {
-					reg.Set(newBackends)
-				} else {
+				newBackends, err := backend.FromConfig(next.Backends)
+				if err != nil {
 					return err
+				}
+				holder.Swap(next) // registry of last-loaded config
+				reg.Set(newBackends)
+				// Drop health snapshots and circuit breakers (and their
+				// per-backend metric children) for backends the new config no
+				// longer declares. Counter families (RequestsTotal etc.) are
+				// deliberately left alone — they're cumulative history, and
+				// rates over them decay on their own.
+				active := make(map[string]struct{}, len(newBackends))
+				for _, b := range newBackends {
+					active[b.Name] = struct{}{}
+				}
+				h.Prune(active)
+				cmgr.Prune(active)
+				// Reconcile the eth_ws head trackers NOW so a removed
+				// backend's newHeads stream stops resurrecting pruned
+				// snapshots instead of surviving until the next 30s tick.
+				ethWSProber.Kick()
+				// Only backends and log apply live; tell the operator what
+				// they changed that won't take effect until restart.
+				if ignored := config.DiffNonReloadable(bootCfg, next); len(ignored) > 0 {
+					log.L().Warn("reload: changes ignored until restart", "sections", ignored)
 				}
 				return log.Init(next.Log.Level, next.Log.Format, nil)
 			}

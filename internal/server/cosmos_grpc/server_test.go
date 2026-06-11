@@ -272,6 +272,185 @@ func TestGRPCPoolEvictsIdle(t *testing.T) {
 	}
 }
 
+// A half-open backend admits exactly one in-flight canary. The first
+// Direct claims it via Acquire; a second Direct arriving before the canary
+// resolves must skip to the next candidate instead of piling onto the
+// probing backend. The legacy read-only Allow gate could not give this
+// guarantee — it filtered, but consumed nothing. ReleaseOutcome (the
+// client-vanished path) must free the slot without resolving the circuit.
+func TestGRPCDirectorHalfOpenAdmitsSingleCanary(t *testing.T) {
+	bs := []*backend.Backend{
+		{
+			Name:      "archive",
+			Coverage:  backend.Coverage{Kind: backend.CovArchive},
+			Weight:    100,
+			Endpoints: map[types.Protocol]string{types.ProtoGRPC: "127.0.0.1:19001"},
+		},
+		{
+			Name:      "shard1",
+			Coverage:  backend.Coverage{Kind: backend.CovBounded, Lower: 1, Upper: 50000},
+			Weight:    100,
+			Endpoints: map[types.Protocol]string{types.ProtoGRPC: "127.0.0.1:19002"},
+		},
+	}
+	reg := backend.NewRegistry(bs)
+	h := healthreg.NewRegistry()
+	for _, bb := range bs {
+		h.Update(healthreg.Snapshot{
+			Backend: bb.Name, Protocol: types.ProtoRPC, Healthy: true, LatestHeight: 100000,
+		})
+		h.Update(healthreg.Snapshot{
+			Backend: bb.Name, Protocol: types.ProtoGRPC, Healthy: true,
+		})
+	}
+	cm := circuit.NewManager(circuit.Policy{
+		ErrorThreshold: 0.5,
+		MinRequests:    2,
+		OpenDuration:   20 * time.Millisecond,
+	})
+	gp := pool.NewGRPCPool(time.Minute)
+	defer gp.CloseAll()
+	dir := NewDirector(selector.NewRangeSelector(reg, h, cm, 0), cm, gp)
+
+	// Trip shard1's gRPC breaker, then let the cooldown elapse so the
+	// selector readmits it as a (half-open-probe) candidate.
+	cm.Record("shard1", types.ProtoGRPC, false)
+	cm.Record("shard1", types.ProtoGRPC, false)
+	time.Sleep(40 * time.Millisecond)
+
+	// direct runs one routing decision with the post-call slot installed
+	// (as streamHandler does) and reports the chosen backend. The pool's
+	// gRPC dial is lazy, so no live upstream is needed.
+	direct := func() string {
+		t.Helper()
+		slot := &atomicString{}
+		ctx := context.WithValue(context.Background(), chosenBackendKey, slot)
+		ctx = metadata.NewIncomingContext(ctx, metadata.New(map[string]string{HeightHeader: "12345"}))
+		if _, _, err := dir.Direct(ctx, "/grpc.health.v1.Health/Check"); err != nil {
+			t.Fatalf("Direct: %v", err)
+		}
+		return slot.Get()
+	}
+
+	// Height 12345 is in shard1's coverage, so shard1 outranks archive.
+	if got := direct(); got != "shard1" {
+		t.Fatalf("first Direct should claim the half-open shard1 canary; chose %q", got)
+	}
+	if got := direct(); got != "archive" {
+		t.Fatalf("second Direct must skip shard1 while its canary is unresolved; chose %q", got)
+	}
+
+	// Client vanished: the admission is released without a sample, so the
+	// canary slot is claimable again and the circuit state is untouched.
+	dir.ReleaseOutcome("shard1")
+	if got := direct(); got != "shard1" {
+		t.Fatalf("after ReleaseOutcome the canary slot should be claimable again; chose %q", got)
+	}
+	if st := cm.State("shard1", types.ProtoGRPC); st != circuit.StateHalfOpen {
+		t.Fatalf("ReleaseOutcome must not resolve the circuit; state %s", st)
+	}
+
+	// A real outcome resolves it: the canary success closes the breaker.
+	dir.RecordOutcome("shard1", true)
+	if st := cm.State("shard1", types.ProtoGRPC); st != circuit.StateClosed {
+		t.Fatalf("canary success should close the breaker; state %s", st)
+	}
+}
+
+// TestGRPCDeadlineExpiryRecordsFailure verifies that when a client context
+// deadline fires while the backend is hanging, the circuit breaker records a
+// FAILURE (not a neutral Release). Under the old wide predicate
+// (ss.Context().Err() != nil), DeadlineExceeded would have triggered a
+// Release, leaving the circuit closed even though the backend was too slow.
+// With the fix (errors.Is(..., context.Canceled)), DeadlineExceeded falls
+// through to RecordOutcome(name, false).
+//
+// Red-first: if run against the old predicate, RecordOutcome(false) is never
+// called; the breaker stays closed and the final Acquire returns true, causing
+// the test to fail with "expected breaker to open after deadline expiry".
+func TestGRPCDeadlineExpiryRecordsFailure(t *testing.T) {
+	// Build a backend whose Check() blocks until its own context is done, so
+	// it will always time out rather than return early.
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hangSrv := grpc.NewServer()
+	healthpb.RegisterHealthServer(hangSrv, &hangingHealthServer{})
+	go func() { _ = hangSrv.Serve(lis) }()
+	defer hangSrv.Stop()
+
+	bs := []*backend.Backend{
+		{
+			Name:      "hang",
+			Coverage:  backend.Coverage{Kind: backend.CovArchive},
+			Weight:    100,
+			Endpoints: map[types.Protocol]string{types.ProtoGRPC: lis.Addr().String()},
+		},
+	}
+	reg := backend.NewRegistry(bs)
+	h := healthreg.NewRegistry()
+	h.Update(healthreg.Snapshot{
+		Backend: "hang", Protocol: types.ProtoRPC, Healthy: true, LatestHeight: 100000,
+	})
+	h.Update(healthreg.Snapshot{
+		Backend: "hang", Protocol: types.ProtoGRPC, Healthy: true,
+	})
+
+	// MinRequests=1 so a single failure is enough to trip the breaker.
+	cm := circuit.NewManager(circuit.Policy{
+		ErrorThreshold: 0.5,
+		MinRequests:    1,
+		OpenDuration:   5 * time.Second,
+	})
+	gp := pool.NewGRPCPool(time.Minute)
+	defer gp.CloseAll()
+	dir := NewDirector(selector.NewRangeSelector(reg, h, cm, 0), cm, gp)
+
+	srv, err := New("127.0.0.1:0", dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = srv.Start(context.Background()) }()
+	defer func() { _ = srv.Shutdown(context.Background()) }()
+
+	frontConn, err := grpc.NewClient(
+		srv.Addr(),
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer frontConn.Close()
+
+	// Make a call with a very short deadline so the backend times out.
+	ctx, cancel := context.WithTimeout(context.Background(), 80*time.Millisecond)
+	defer cancel()
+	_, _ = healthpb.NewHealthClient(frontConn).Check(ctx, &healthpb.HealthCheckRequest{Service: ""})
+
+	// Give the post-call wrapper time to resolve the outcome.
+	time.Sleep(20 * time.Millisecond)
+
+	// With the fix: DeadlineExceeded falls through to RecordOutcome(false),
+	// and with MinRequests=1 the single failure trips the breaker open.
+	// Acquire should now return false.
+	if cm.Acquire("hang", types.ProtoGRPC) {
+		cm.Release("hang", types.ProtoGRPC) // clean up the admission
+		t.Fatal("expected breaker to open after deadline expiry; Acquire returned true (neutral Release was used instead of RecordOutcome)")
+	}
+}
+
+// hangingHealthServer is a gRPC health server whose Check blocks until the
+// request context expires — simulating a backend that is too slow.
+type hangingHealthServer struct {
+	healthpb.UnimplementedHealthServer
+}
+
+func (h *hangingHealthServer) Check(ctx context.Context, _ *healthpb.HealthCheckRequest) (*healthpb.HealthCheckResponse, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
 // helpers --------------------------------------------------------------
 
 func grpcUnavailable(msg string) error {

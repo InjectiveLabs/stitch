@@ -26,6 +26,7 @@ import (
 // served. The chunk that proves multicast is `conns.Load() == 1`.
 type hubMock struct {
 	emitN    int64
+	emitGate chan struct{} // emission waits for this to close (newHubMock pre-closes it)
 	srv      *httptest.Server
 	upgrader websocket.Upgrader
 	conns    atomic.Int64
@@ -36,8 +37,20 @@ type hubMock struct {
 
 func newHubMock(t *testing.T, emitN int64) *hubMock {
 	t.Helper()
+	m := newGatedHubMock(t, emitN)
+	close(m.emitGate) // emit as soon as the subscribe ack is out
+	return m
+}
+
+// newGatedHubMock holds emission until the test closes emitGate, so the
+// test can attach every subscriber before the first event — the hub fans
+// out only to already-attached subscribers, so an ungated mock races
+// late attachers against its emit window.
+func newGatedHubMock(t *testing.T, emitN int64) *hubMock {
+	t.Helper()
 	m := &hubMock{
 		emitN:    emitN,
+		emitGate: make(chan struct{}),
 		upgrader: websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }},
 	}
 	mux := http.NewServeMux()
@@ -120,6 +133,12 @@ func (m *hubMock) handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	select {
+	case <-m.emitGate:
+	case <-readDone:
+		return
+	}
+
 	for i := int64(1); i <= m.emitN; i++ {
 		notif := fmt.Sprintf(
 			`{"jsonrpc":"2.0","id":%s,"result":{"block_height":%d}}`, string(subID), i,
@@ -158,7 +177,10 @@ func newHubRig(t *testing.T, mocks ...*hubMock) *Hub {
 // TestHubMulticast100Clients verifies that 100 client subscriptions to
 // the same canonical filter end up sharing a single upstream connection.
 func TestHubMulticast100Clients(t *testing.T) {
-	mock := newHubMock(t, 5)
+	// Gated mock: emission starts only after every subscriber is attached.
+	// Ungated, the 10ms emit window raced the attach loop and a scheduling
+	// stall (e.g. under -race) orphaned the late tail of subscribers.
+	mock := newGatedHubMock(t, 5)
 	hub := newHubRig(t, mock)
 
 	const N = 100
@@ -176,6 +198,9 @@ func TestHubMulticast100Clients(t *testing.T) {
 			s.Detach()
 		}
 	}()
+	// Subscribe attaches synchronously, so all N subscribers are in the
+	// fan-out list — every one of them must now see every event.
+	close(mock.emitGate)
 
 	// Wait for first event on every subscriber.
 	deadline := time.Now().Add(3 * time.Second)

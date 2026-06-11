@@ -86,6 +86,17 @@ func (h *HashIndex) Set(hash string, height int64) {
 	}
 }
 
+// Purge drops every entry and returns how many were removed.
+func (h *HashIndex) Purge() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	n := h.order.Len()
+	h.entries = make(map[string]*list.Element)
+	h.order.Init()
+	metrics.CacheTotal.WithLabelValues("hashidx", "purge").Add(float64(n))
+	return n
+}
+
 // Size returns the current entry count.
 func (h *HashIndex) Size() int {
 	h.mu.RLock()
