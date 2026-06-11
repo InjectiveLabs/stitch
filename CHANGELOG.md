@@ -59,6 +59,16 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Fixed
 
+- A flapping ChainStream upstream is now re-dialed with jittered
+  exponential backoff (250ms doubling to a 5s cap, ±20% jitter) between
+  resume attempts; previously all 8 attempts fired back-to-back, hammering
+  a struggling backend with instant reconnects. The 8-attempt budget now
+  spans roughly 30s worst case, and a resume prefers a different upstream
+  over the one whose stream just dropped when an alternative is viable.
+- `stitch init` wrote a starter config with `multicast: true`; it now ships
+  `false`, matching the conservative example-config defaults (the feature
+  is opt-in) — a prior pass flipped the examples but missed the starter
+  template.
 - WS subscription upstreams (eth_ws and `/injstream-ws` sessions, and the
   multicast hub) now send keepalive pings every 20s; previously a quiet
   stream hit the 60s read deadline and silently churned through a resume
@@ -77,6 +87,14 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Changed
 
+- Circuit-breaker half-open admission now applies to the Cosmos gRPC and
+  ChainStream proxies too: their directors claim an admission before
+  committing to a backend, so a recovering backend receives exactly one
+  probe at a time across every protocol instead of an unbounded burst of
+  concurrently allowed calls; a client that disconnects mid-call releases
+  the admission without debiting the backend. With every caller on the
+  admission path, a stale pre-trip outcome arriving after the breaker
+  tripped and cooled down no longer closes or re-trips the circuit.
 - **BEHAVIOR**: hedging is now genuinely config-gated. Configs without
   `policies.hedging.enabled: true` no longer hedge at all; previously the
   manifest's hedge-safe flag alone enabled hedging on the EVM JSON-RPC
