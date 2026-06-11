@@ -98,6 +98,9 @@ func applyDefaults(c *Config) {
 	if c.Policies.Subscriptions.SlowConsumer == "" {
 		c.Policies.Subscriptions.SlowConsumer = "drop"
 	}
+	if c.Policies.Subscriptions.SendBuffer == 0 {
+		c.Policies.Subscriptions.SendBuffer = 64
+	}
 	if c.Policies.Subscriptions.ReplayTimeout == 0 {
 		c.Policies.Subscriptions.ReplayTimeout = 30 * time.Second
 	}

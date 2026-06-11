@@ -46,16 +46,19 @@ type SessionConfig struct {
 	// HandshakeTimeout bounds the default upstream dialer's WS handshake;
 	// used only when Dialer is nil.
 	HandshakeTimeout time.Duration
+	// ReplayTimeout is the max time to wait for a dialable upstream during
+	// resume before terminating the session (policies.subscriptions.
+	// replay_timeout). <= 0 means a single dial pass per resume.
+	ReplayTimeout time.Duration
 }
 
 // NewSession constructs a session pinned to the given client connection.
 // Run() drives it until the client or all upstreams give up.
 func NewSession(client *websocket.Conn, cfg SessionConfig) *Session {
 	ad := newEthAdapter()
-	return &Session{
-		eng: newEngine(client, cfg.Selector, cfg.Dialer, cfg.HandshakeTimeout, ad),
-		ad:  ad,
-	}
+	eng := newEngine(client, cfg.Selector, cfg.Dialer, cfg.HandshakeTimeout, ad)
+	eng.replayTimeout = cfg.ReplayTimeout
+	return &Session{eng: eng, ad: ad}
 }
 
 // Run blocks until the session terminates. Returns the terminal cause.

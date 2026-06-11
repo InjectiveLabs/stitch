@@ -9,6 +9,25 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Added
 
+- `/injstream-ws` multicast is now actually wired, behind
+  `policies.subscriptions.multicast` (default **false**). It was advertised
+  in the README and parsed from config, but the multicast hub had zero
+  production callers — every client always got its own upstream connection.
+  With the flag on, clients whose filters share a canonical key share one
+  upstream; the shared subscription resumes across backend failure with
+  cursor dedup. **In multicast mode, non-`subscribe`/`unsubscribe` JSON-RPC
+  frames on `/injstream-ws` are rejected with a `-32601` error instead of
+  per-session passthrough** (there is no per-client upstream to forward
+  them to).
+- The rest of `policies.subscriptions` is now real (previously parsed but
+  consumed by nothing): `slow_consumer` governs the multicast fan-out
+  policy per client (`drop` | `disconnect` | `backpressure`; drops are
+  counted in `stitch_subscription_dropped_notifications_total{reason=
+  "slow_consumer"}`), the new `send_buffer` knob sizes the per-client
+  fan-out queue (default 64), and `replay_timeout` is the max time a
+  resume keeps re-dialing for an upstream (250ms→2s backoff between
+  passes) before the session/subscriber is dropped — 0 restores the
+  previous single-pass behavior.
 - `policies.cache.ttl`, `policies.cache.hash_index_entries`, and
   `policies.cache.response_entries` are now wired: they size the hash→height
   index and the response cache and set the response-entry lifetime
@@ -35,6 +54,11 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Fixed
 
+- WS subscription upstreams (eth_ws and `/injstream-ws` sessions, and the
+  multicast hub) now send keepalive pings every 20s; previously a quiet
+  stream hit the 60s read deadline and silently churned through a resume
+  — and under multicast that hiccup would have hit every attached client
+  at once.
 - EVM-only backends (no CometBFT `rpc` endpoint) are now health-gated via
   their `eth_ws` head stream; a dropped stream marks the backend unhealthy
   for EVM/stream routing until it reconnects. Previously such backends were

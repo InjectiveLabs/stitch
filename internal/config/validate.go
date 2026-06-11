@@ -133,6 +133,12 @@ func validatePolicies(p PoliciesConfig) error {
 	default:
 		return fmt.Errorf("policies.subscriptions.slow_consumer=%q (allowed: drop|disconnect|backpressure)", p.Subscriptions.SlowConsumer)
 	}
+	// A configured send_buffer must be ≥ 1 — an unbuffered fan-out channel
+	// would stall the hub on every notification. Zero means "unset" here
+	// (Load's defaults turn it into 64 before validation runs).
+	if p.Subscriptions.SendBuffer < 0 {
+		return errors.New("policies.subscriptions.send_buffer must be ≥ 1")
+	}
 	if p.Cache.Enabled && p.Cache.TTL <= 0 {
 		return errors.New("policies.cache.ttl must be > 0 when cache is enabled")
 	}

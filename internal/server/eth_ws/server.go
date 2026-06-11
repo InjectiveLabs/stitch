@@ -38,6 +38,17 @@ type Server struct {
 	dialer   *websocket.Dialer
 	srv      *http.Server
 	tracker  *server.ConnTracker
+
+	subOpts SubscriptionOptions
+}
+
+// SubscriptionOptions mirrors the policies.subscriptions knobs this
+// listener consumes.
+type SubscriptionOptions struct {
+	// ReplayTimeout is the max time to wait for a dialable upstream
+	// during resume before terminating the session. <= 0 means a single
+	// dial pass per resume.
+	ReplayTimeout time.Duration
 }
 
 func New(addr string, sel selector.Selector) *Server {
@@ -63,6 +74,9 @@ func New(addr string, sel selector.Selector) *Server {
 	}
 	return s
 }
+
+// SetSubscriptions installs the subscriptions policy. Call before Start.
+func (s *Server) SetSubscriptions(o SubscriptionOptions) { s.subOpts = o }
 
 func (s *Server) Name() string { return "eth_ws" }
 
@@ -121,8 +135,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer s.tracker.Untrack(clientConn)
 
 	sess := subscription.NewSession(clientConn, subscription.SessionConfig{
-		Selector: s.selector,
-		Dialer:   s.dialer,
+		Selector:      s.selector,
+		Dialer:        s.dialer,
+		ReplayTimeout: s.subOpts.ReplayTimeout,
 	})
 	if err := sess.Run(ctx); err != nil {
 		log.FromCtx(ctx).Debug("eth_ws: session ended", "err", err.Error())

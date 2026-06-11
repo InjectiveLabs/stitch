@@ -137,7 +137,11 @@ func startCmd() *cobra.Command {
 				mgr.Add(ethSrv)
 			}
 			if cfg.Listen.EthWS.Enabled() {
-				mgr.Add(eth_ws.New(cfg.Listen.EthWS.Addr, selCore))
+				ethWS := eth_ws.New(cfg.Listen.EthWS.Addr, selCore)
+				ethWS.SetSubscriptions(eth_ws.SubscriptionOptions{
+					ReplayTimeout: cfg.Policies.Subscriptions.ReplayTimeout,
+				})
+				mgr.Add(ethWS)
 			}
 			if cfg.Listen.ChainStream.Enabled() {
 				cs, err := chainstream.New(cfg.Listen.ChainStream.Addr, selCore, cmgr, grpcPool)
@@ -147,7 +151,14 @@ func startCmd() *cobra.Command {
 				mgr.Add(cs)
 			}
 			if cfg.Listen.InjWS.Enabled() {
-				mgr.Add(inj_ws.New(cfg.Listen.InjWS.Addr, selCore))
+				injWS := inj_ws.New(cfg.Listen.InjWS.Addr, selCore)
+				injWS.SetSubscriptions(inj_ws.SubscriptionOptions{
+					Multicast:     cfg.Policies.Subscriptions.Multicast,
+					SlowConsumer:  cfg.Policies.Subscriptions.SlowConsumer,
+					SendBuffer:    cfg.Policies.Subscriptions.SendBuffer,
+					ReplayTimeout: cfg.Policies.Subscriptions.ReplayTimeout,
+				})
+				mgr.Add(injWS)
 			}
 
 			// Non-reloadable sections keep running with the BOOT config no

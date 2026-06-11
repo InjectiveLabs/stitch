@@ -94,14 +94,25 @@ type engine struct {
 	adapter  protocolAdapter
 	tag      string // log prefix; the kind half of SessionLabels
 
+	// tuning carries the upstream dial/read-deadline/keepalive knobs;
+	// always defaultConnTuning in production, tightened by package tests.
+	tuning connTuning
+
+	// replayTimeout bounds how long a resume keeps retrying dial passes
+	// after upstream death before the session gives up. <= 0 means a
+	// single pass (the pre-knob behavior). The initial dial is always a
+	// single pass — there is nothing to resume yet.
+	replayTimeout time.Duration
+
 	upstream  atomic.Pointer[websocket.Conn]
 	upBackend atomic.Value // string
 
 	clientWriteMu   sync.Mutex
 	upstreamWriteMu sync.Mutex
 
-	closed atomic.Bool
-	done   chan struct{} // closed when run exits; releases clientReader sends
+	closed     atomic.Bool
+	done       chan struct{} // closed when run exits; releases clientReader sends
+	clientGone chan struct{} // closed by clientReader on read error; aborts resume waits
 }
 
 // newEngine wires an engine to its client connection and adapter. A nil
@@ -115,13 +126,15 @@ func newEngine(client *websocket.Conn, sel selector.Selector, dialer *websocket.
 	}
 	_, tag := adapter.SessionLabels()
 	return &engine{
-		id:       runtime.NewRequestID(),
-		client:   client,
-		selector: sel,
-		dialer:   dialer,
-		adapter:  adapter,
-		tag:      tag,
-		done:     make(chan struct{}),
+		id:         runtime.NewRequestID(),
+		client:     client,
+		selector:   sel,
+		dialer:     dialer,
+		adapter:    adapter,
+		tag:        tag,
+		tuning:     defaultConnTuning(),
+		done:       make(chan struct{}),
+		clientGone: make(chan struct{}),
 	}
 }
 
@@ -144,9 +157,18 @@ func (e *engine) run(ctx context.Context, readClient func(clientCh chan<- []byte
 	clientErrCh := make(chan error, 1)
 	go readClient(clientCh, clientErrCh)
 
+	// resumeDeadline bounds re-dial retries after upstream death; set when
+	// the run loop decides to resume. Zero for the initial dial, which is
+	// always a single candidate pass — there is nothing to resume yet.
+	var resumeDeadline time.Time
+
 	for {
-		// Dial an upstream.
-		if !e.dialUpstream(ctx) {
+		// Dial an upstream; within a resume window, keep making passes.
+		dialed := e.dialUpstream(ctx)
+		if !dialed && !resumeDeadline.IsZero() {
+			dialed = e.redialUntil(ctx, resumeDeadline)
+		}
+		if !dialed {
 			return errors.New("no eligible upstream")
 		}
 
@@ -162,7 +184,15 @@ func (e *engine) run(ctx context.Context, readClient func(clientCh chan<- []byte
 		}
 
 		upDone := make(chan error, 1)
-		go func() { upDone <- e.upstreamReader() }()
+		pingStop := make(chan struct{})
+		if conn := e.upstream.Load(); conn != nil {
+			go keepAliveLoop(conn, e.tuning, pingStop)
+		}
+		go func() {
+			err := e.upstreamReader()
+			close(pingStop) // reader exit ⇒ conn is done; stop pinging it
+			upDone <- err
+		}()
 
 		// Forward client → upstream until either side dies.
 	forward:
@@ -189,6 +219,10 @@ func (e *engine) run(ctx context.Context, readClient func(clientCh chan<- []byte
 				<-upDone
 				return err
 			case upErr := <-upDone:
+				// Close the dead conn ourselves: on adapter errors the
+				// reader exits with the conn still open, and the reconnect
+				// below would otherwise strand it until process exit.
+				e.tearDownUpstream()
 				resumable := e.adapter.ResumableSubs()
 				log.FromCtx(ctx).Info(e.tag+": upstream gone, evaluating resume",
 					"backend", e.upBackend.Load(),
@@ -199,6 +233,9 @@ func (e *engine) run(ctx context.Context, readClient func(clientCh chan<- []byte
 					return nil
 				}
 				metrics.SubscriptionResumes.WithLabelValues(e.adapter.ResumeReason()).Inc()
+				if e.replayTimeout > 0 {
+					resumeDeadline = time.Now().Add(e.replayTimeout)
+				}
 				break forward // loop reconnects
 			}
 		}
@@ -214,7 +251,8 @@ func (e *engine) clientReader(clientCh chan<- []byte, errCh chan<- error) {
 	for {
 		_, msg, err := e.client.ReadMessage()
 		if err != nil {
-			errCh <- err // cap-1, single send ever — never blocks
+			errCh <- err        // cap-1, single send ever — never blocks
+			close(e.clientGone) // run may be parked in a resume wait, not the select
 			return
 		}
 		select {
@@ -243,35 +281,45 @@ func (e *engine) upstreamReader() error {
 	}
 }
 
-// dialUpstream walks the selector candidates for the adapter's route key
-// and opens a WS to the first one that answers (5s dial timeout, 60s read
-// deadline refreshed by pongs). Returns false if every candidate fails.
+// dialUpstream makes one pass over the selector candidates for the
+// adapter's route key and binds the first one that answers (dial timeout,
+// read deadline, and pong handler per e.tuning — see dialFirstCandidate).
+// Returns false if every candidate fails.
 func (e *engine) dialUpstream(ctx context.Context) bool {
-	key := e.adapter.DialRouteKey()
-	candidates := e.selector.Candidates(key)
-	for _, b := range candidates {
-		ep := b.Endpoint(key.Protocol)
-		if ep == "" {
-			continue
-		}
-		addr := e.adapter.NormalizeEndpoint(ep)
-		dialCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		conn, _, err := e.dialer.DialContext(dialCtx, addr, nil)
-		cancel()
-		if err != nil {
-			log.FromCtx(ctx).Warn(e.tag+": upstream dial failed", "backend", b.Name, "err", err.Error())
-			continue
-		}
-		conn.SetReadDeadline(time.Now().Add(60 * time.Second))
-		conn.SetPongHandler(func(string) error {
-			return conn.SetReadDeadline(time.Now().Add(60 * time.Second))
-		})
-		e.upstream.Store(conn)
-		e.upBackend.Store(b.Name)
-		log.FromCtx(ctx).Info(e.tag+": upstream connected", "session_id", e.id, "backend", b.Name)
-		return true
+	conn, backend, ok := dialFirstCandidate(ctx, e.selector, e.dialer, e.adapter.DialRouteKey(), e.adapter.NormalizeEndpoint, e.tag, e.tuning)
+	if !ok {
+		return false
 	}
-	return false
+	e.upstream.Store(conn)
+	e.upBackend.Store(backend)
+	log.FromCtx(ctx).Info(e.tag+": upstream connected", "session_id", e.id, "backend", backend)
+	return true
+}
+
+// redialUntil repeats dial passes — doubling backoff between passes — until
+// one succeeds or deadline passes. Aborts early when ctx is cancelled or
+// the client connection is gone: retrying a resume nobody is listening to
+// would pin the handler (and graceful shutdown) for the whole window.
+func (e *engine) redialUntil(ctx context.Context, deadline time.Time) bool {
+	backoff := resumeBackoffMin
+	for {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return false
+		}
+		wait := min(backoff, remaining)
+		select {
+		case <-ctx.Done():
+			return false
+		case <-e.clientGone:
+			return false
+		case <-time.After(wait):
+		}
+		if e.dialUpstream(ctx) {
+			return true
+		}
+		backoff = min(backoff*2, resumeBackoffMax)
+	}
 }
 
 func (e *engine) tearDownUpstream() {

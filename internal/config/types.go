@@ -111,9 +111,19 @@ type HealthPolicy struct {
 	MaxLagBlocks  int64         `yaml:"max_lag_blocks"`
 }
 
+// SubscriptionsPolicy tunes the WS subscription listeners.
+//
+// Multicast (default false) coalesces /injstream-ws clients with the same
+// canonical filter onto one shared upstream connection. SlowConsumer and
+// SendBuffer apply to the multicast fan-out: the policy when a client's
+// send buffer fills, and that buffer's capacity (default 64).
+// ReplayTimeout is the max time to wait for a dialable upstream during a
+// subscription resume before dropping the subscriber/session; 0 disables
+// the retry window (a resume gets a single dial pass).
 type SubscriptionsPolicy struct {
 	Multicast     bool          `yaml:"multicast"`
 	SlowConsumer  string        `yaml:"slow_consumer"` // drop | disconnect | backpressure
+	SendBuffer    int           `yaml:"send_buffer,omitempty"`
 	ReplayTimeout time.Duration `yaml:"replay_timeout"`
 }
 

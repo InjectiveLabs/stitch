@@ -82,7 +82,7 @@ where each piece is independently testable and replaceable.
   Works for `eth_subscribe newHeads` + `logs`, `injective.stream.v*.Stream`,
   and `/injstream-ws`.
 - **Multicast** — N clients with the same canonical filter share one
-  upstream connection.
+  upstream connection. Opt-in via `policies.subscriptions.multicast`.
 - **Hash → height memo** — `block_by_hash`, `eth_getBlockByHash`,
   `eth_getTransactionByHash`, etc. go from O(N backends) to O(1) lookups.
 - **Broadcast fan-out** — tx submission is sent to all healthy backends
@@ -258,9 +258,14 @@ policies:
                                        # appear ~probe_interval × block_rate blocks behind.
                                        # Set this comfortably above that gap, or omit it.
   subscriptions:
-    multicast: true                    # N clients / 1 upstream
-    slow_consumer: drop                # drop | disconnect | backpressure
-    replay_timeout: 30s                # max wait for resume cursor catch-up
+    multicast: true                    # opt-in: /injstream-ws clients with the same
+                                       # canonical filter share 1 upstream (default false)
+    slow_consumer: drop                # multicast fan-out policy when a client's send
+                                       # buffer fills: drop | disconnect | backpressure
+    send_buffer: 64                    # per-client fan-out buffer, events (≥ 1; default 64)
+    replay_timeout: 30s                # max time to wait for a dialable upstream during
+                                       # resume before dropping the subscriber/session
+                                       # (0 = a single dial pass per resume)
   dangerous_methods:
     allow:                             # opt-in for debug_*/personal_*/miner_*
       - debug_traceCall
@@ -313,11 +318,23 @@ The client sees a continuous stream — same ID, monotonic cursor, no gap.
 
 ### Multicast (`/injstream-ws`)
 
+Opt-in via `policies.subscriptions.multicast: true` (default off — each
+client gets its own upstream connection).
+
 When 100 clients subscribe to the same filter, stitch canonicalizes the
 filter (sorted keys, sorted string arrays), hashes it, and uses the hash
 as a multicast key. The first client opens an upstream subscription; the
 remaining 99 attach to the same upstream. One TCP connection, fan-out
-to N clients.
+to N clients. A slow client is handled per
+`policies.subscriptions.slow_consumer` over its `send_buffer`-sized
+queue, and on upstream death the shared subscription resumes within
+`replay_timeout` with cursor dedup — no client sees a duplicate.
+
+In multicast mode `/injstream-ws` serves **only** `subscribe` /
+`unsubscribe`; any other JSON-RPC frame is answered with a `-32601`
+error instead of per-session passthrough, because there is no per-client
+upstream to forward it to (a dedicated passthrough connection per client
+would defeat the mode).
 
 ### Hash → height memo
 
@@ -445,7 +462,7 @@ Validated under chaos:
 | Failover                         | ✗                   | ✗                | ✓          |
 | Circuit breakers                 | ✗                   | ✗                | ✓          |
 | Subscription resume              | ✗                   | ✗                | **✓**      |
-| Multicast (1 upstream / N clients)| ✗                  | ✗                | ✓          |
+| Multicast (1 upstream / N clients)| ✗                  | ✗                | ✓ (opt-in) |
 | Broadcast fan-out                | ✗                   | ✗                | ✓          |
 | Hedging                          | ✗                   | ✗                | ✓          |
 | Hash → height memo               | ✗                   | ✗                | ✓          |

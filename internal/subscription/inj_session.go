@@ -52,15 +52,18 @@ type InjSessionConfig struct {
 	// HandshakeTimeout bounds the default upstream dialer's WS handshake;
 	// used only when Dialer is nil.
 	HandshakeTimeout time.Duration
+	// ReplayTimeout is the max time to wait for a dialable upstream during
+	// resume before terminating the session (policies.subscriptions.
+	// replay_timeout). <= 0 means a single dial pass per resume.
+	ReplayTimeout time.Duration
 }
 
 // NewInjSession constructs a /injstream-ws session.
 func NewInjSession(client *websocket.Conn, cfg InjSessionConfig) *InjSession {
 	ad := newInjAdapter()
-	return &InjSession{
-		eng: newEngine(client, cfg.Selector, cfg.Dialer, cfg.HandshakeTimeout, ad),
-		ad:  ad,
-	}
+	eng := newEngine(client, cfg.Selector, cfg.Dialer, cfg.HandshakeTimeout, ad)
+	eng.replayTimeout = cfg.ReplayTimeout
+	return &InjSession{eng: eng, ad: ad}
 }
 
 // Run blocks until terminated. Returns the terminal cause.
