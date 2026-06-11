@@ -68,6 +68,7 @@ func (s *RangeSelector) Candidates(k types.RouteKey) []*backend.Backend {
 		b     *backend.Backend
 		score float64
 	}
+	hProtos := healthProtocols(k.Protocol)
 	picks := make([]scored, 0, len(all))
 	for _, b := range all {
 		if !b.Has(k.Protocol) {
@@ -93,7 +94,7 @@ func (s *RangeSelector) Candidates(k types.RouteKey) []*backend.Backend {
 			hs    health.Snapshot
 			found bool
 		)
-		for _, hp := range healthProtocols(k.Protocol) {
+		for _, hp := range hProtos {
 			if hs, found = s.health.Get(b.Name, hp); found {
 				break
 			}
@@ -126,6 +127,12 @@ func (s *RangeSelector) Candidates(k types.RouteKey) []*backend.Backend {
 	return out
 }
 
+// scoreBaseline keeps the weighted inner term strictly positive across the
+// representable range (lagPenalty ≤ 1 by the pre-score filter, specificity
+// ≥ 0.05), so a higher operator weight can never rank a backend below a
+// lower-weighted peer. Without it, weight bias inverts under heavy lag.
+const scoreBaseline = 0.6
+
 // score is higher = better candidate. Only healthy backends reach here
 // (unhealthy ones are filtered in Candidates), so health is not a term.
 func (s *RangeSelector) score(b *backend.Backend, hs health.Snapshot, head int64) float64 {
@@ -135,7 +142,7 @@ func (s *RangeSelector) score(b *backend.Backend, hs health.Snapshot, head int64
 		lagPenalty = float64(hs.Lag) / float64(s.maxLag)
 	}
 	weight := float64(b.Weight) / 100.0
-	return weight * (s.weights.Specificity*specificity - s.weights.Lag*lagPenalty)
+	return weight * (scoreBaseline + s.weights.Specificity*specificity - s.weights.Lag*lagPenalty)
 }
 
 // specificityScore returns 1.0 for the narrowest coverage (a tiny pruned

@@ -274,6 +274,58 @@ func TestRangeSelectorMappedSnapshotBeatsNative(t *testing.T) {
 	}
 }
 
+// TestRangeSelectorWeightMonotonicity asserts that the backend with a higher
+// operator weight ranks first even when both backends carry maximum lag (Lag ==
+// maxLag). This is the regression guard for the inverted-weight bug that
+// appears when scoreBaseline is absent: weight × negative inner-term flips the
+// ordering under heavy lag.
+func TestRangeSelectorWeightMonotonicity(t *testing.T) {
+	const maxLag = int64(50)
+	bs := []*backend.Backend{
+		{
+			Name:      "heavy",
+			Coverage:  backend.Coverage{Kind: backend.CovArchive},
+			Weight:    200, // higher weight — must rank first
+			Endpoints: map[types.Protocol]string{types.ProtoRPC: "http://heavy:26657"},
+		},
+		{
+			Name:      "light",
+			Coverage:  backend.Coverage{Kind: backend.CovArchive},
+			Weight:    100,
+			Endpoints: map[types.Protocol]string{types.ProtoRPC: "http://light:26657"},
+		},
+	}
+	reg := backend.NewRegistry(bs)
+	h := health.NewRegistry()
+	// Both backends: healthy, same head, Lag == maxLag (passes the > filter).
+	for _, b := range bs {
+		h.Update(health.Snapshot{
+			Backend:      b.Name,
+			Protocol:     types.ProtoRPC,
+			Healthy:      true,
+			LatestHeight: 100_000,
+			Lag:          maxLag,
+		})
+	}
+	cm := circuit.NewManager(circuit.Policy{
+		ErrorThreshold: 0.5,
+		MinRequests:    4,
+		OpenDuration:   100 * time.Millisecond,
+	})
+	s := NewRangeSelector(reg, h, cm, maxLag)
+
+	cands := s.Candidates(types.RouteKey{
+		Protocol: types.ProtoRPC,
+		Class:    types.ClassLatest,
+	})
+	if len(cands) != 2 {
+		t.Fatalf("expected 2 candidates, got %d", len(cands))
+	}
+	if cands[0].Name != "heavy" {
+		t.Errorf("expected heavy (weight=200) first, got %s — weight-monotonicity broken", cands[0].Name)
+	}
+}
+
 // TestRangeSelectorHeightFloor exercises the selector floor: when the
 // queried height exceeds MaxHead (stale probe / brief WS-disconnect window),
 // any backend whose coverage upper bound rides head (pruned / open /

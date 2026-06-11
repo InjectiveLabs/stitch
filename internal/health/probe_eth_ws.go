@@ -180,6 +180,8 @@ func (p *EthWSProber) trackOne(ctx context.Context, name, ep string) {
 		// snapshot and gauge child in the window before reconcile cancels us.
 		if p.registry.Has(name) {
 			metrics.BackendHealth.WithLabelValues(name, string(types.ProtoEthWS)).Set(0)
+			// Single-writer: only this backend's trackOne goroutine writes the
+			// (name, ProtoEthWS) snapshot, so Get-then-Update is race-free.
 			last, _ := p.health.Get(name, types.ProtoEthWS)
 			p.health.Update(Snapshot{
 				Backend:      name,
