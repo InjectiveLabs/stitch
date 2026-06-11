@@ -1,9 +1,9 @@
 package subscription
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -14,9 +14,9 @@ import (
 
 	"github.com/decentrio/stitch/internal/log"
 	"github.com/decentrio/stitch/internal/metrics"
-	"github.com/decentrio/stitch/internal/runtime"
 	"github.com/decentrio/stitch/internal/selector"
 	"github.com/decentrio/stitch/internal/types"
+	"github.com/decentrio/stitch/internal/wsurl"
 )
 
 // InjSession is one /injstream-ws client connection paired with one
@@ -30,24 +30,12 @@ import (
 //   - Cursor = block_height (single int) extracted from the JSON
 //     notification result. ChainStream guarantees monotonic delivery, so
 //     dedup is straightforward height comparison.
+//
+// InjSession is a thin wrapper: the shared engine (engine.go) owns the
+// connection/goroutine mechanics; injAdapter below owns the protocol.
 type InjSession struct {
-	id       string
-	client   *websocket.Conn
-	selector selector.Selector
-	dialer   *websocket.Dialer
-
-	mu      sync.Mutex
-	subs    map[string]*InjSub // subscription_id → sub
-	pending map[string]*InjSub // our internal JSON-RPC id → sub awaiting upstream ack
-	idSeq   atomic.Uint64
-
-	upstream  atomic.Pointer[websocket.Conn]
-	upBackend atomic.Value // string
-
-	clientWriteMu   sync.Mutex
-	upstreamWriteMu sync.Mutex
-	closed          atomic.Bool
-	done            chan struct{} // closed when Run exits; releases clientReader sends
+	eng *engine
+	ad  *injAdapter
 }
 
 // InjSub captures one /injstream-ws subscription's full replay state.
@@ -68,172 +56,90 @@ type InjSessionConfig struct {
 
 // NewInjSession constructs a /injstream-ws session.
 func NewInjSession(client *websocket.Conn, cfg InjSessionConfig) *InjSession {
-	d := cfg.Dialer
-	if d == nil {
-		d = &websocket.Dialer{HandshakeTimeout: 5 * time.Second}
-	}
+	ad := newInjAdapter()
 	return &InjSession{
-		id:       runtime.NewRequestID(),
-		client:   client,
-		selector: cfg.Selector,
-		dialer:   d,
-		subs:     make(map[string]*InjSub),
-		pending:  make(map[string]*InjSub),
-		done:     make(chan struct{}),
+		eng: newEngine(client, cfg.Selector, cfg.Dialer, ad),
+		ad:  ad,
 	}
 }
 
 // Run blocks until terminated. Returns the terminal cause.
 func (s *InjSession) Run(ctx context.Context) error {
-	defer s.closeClient(websocket.CloseGoingAway, "session ending")
-	defer metrics.SubscriptionsActive.WithLabelValues(string(types.ProtoChainStream), "inj_ws").Dec()
-	defer close(s.done) // every return stops draining clientCh; release the reader
-	metrics.SubscriptionsActive.WithLabelValues(string(types.ProtoChainStream), "inj_ws").Inc()
+	return s.eng.run(ctx, s.clientReader)
+}
 
-	clientCh := make(chan []byte, 32)
-	clientErrCh := make(chan error, 1)
-	go s.clientReader(ctx, clientCh, clientErrCh)
+// clientReader delegates to the engine's pump. The indirection exists so
+// the spawned goroutine's stack keeps an (*InjSession).clientReader frame
+// — the lifecycle test probes goroutine dumps for that symbol.
+func (s *InjSession) clientReader(clientCh chan<- []byte, errCh chan<- error) {
+	s.eng.clientReader(clientCh, errCh)
+}
 
-	for {
-		if !s.dialUpstream(ctx) {
-			return errors.New("no eligible upstream for /injstream-ws")
-		}
-		s.replaySubs(ctx)
+// routeUpstreamFrame feeds one upstream frame through the adapter — the
+// same seam the engine's upstreamReader drives; kept as a method so
+// package tests can inject frames without a live upstream.
+func (s *InjSession) routeUpstreamFrame(_ context.Context, msg []byte) error {
+	return s.ad.HandleUpstreamFrame(s.eng, msg)
+}
 
-		upDone := make(chan error, 1)
-		go func() { upDone <- s.upstreamReader(ctx) }()
+// injAdapter implements the /injstream-ws protocol half of a session:
+//
+//   - The client-supplied subscription_id keys the subscription; the
+//     internal id ("stitch_inj_%d") is only the upstream correlation and
+//     is re-minted on every resume.
+//   - The subscribe ack is the literal result string "success". The
+//     first-time ack is forwarded under the client's original JSON-RPC
+//     id; resume acks (cursor already advanced) are absorbed.
+//   - Unparseable client frames are forwarded verbatim upstream, and
+//     unknown upstream frames verbatim to the client (the eth adapter
+//     drops unknown-sub notifications instead — /injstream-ws responses
+//     have no method field to discriminate on, so passthrough is the
+//     protocol-correct default for unrecognized shapes).
+type injAdapter struct {
+	mu      sync.Mutex
+	subs    map[string]*InjSub // subscription_id → sub
+	pending map[string]*InjSub // our internal JSON-RPC id → sub awaiting upstream ack
+	// byUpID indexes each live sub under its CURRENT UpstreamID — a mirror
+	// of subs (same values, different key) maintained at subscribe,
+	// unsubscribe, and replay so notification matching is a lookup, not a
+	// scan. Entries for replaced/removed subs are deleted eagerly so
+	// stale-id notifications can't match a dead sub.
+	byUpID map[string]*InjSub
+	idSeq  atomic.Uint64
+}
 
-	forward:
-		for {
-			select {
-			case <-ctx.Done():
-				s.tearDownUpstream()
-				<-upDone
-				return ctx.Err()
-			case msg, ok := <-clientCh:
-				if !ok {
-					s.tearDownUpstream()
-					<-upDone
-					return nil
-				}
-				if err := s.routeClientFrame(msg); err != nil {
-					log.FromCtx(ctx).Debug("inj_ws: client frame route failed", "err", err.Error())
-					s.tearDownUpstream()
-					<-upDone
-					return err
-				}
-			case err := <-clientErrCh:
-				s.tearDownUpstream()
-				<-upDone
-				return err
-			case <-upDone:
-				log.FromCtx(ctx).Info("inj_ws: upstream gone, evaluating resume",
-					"backend", s.upBackend.Load(),
-					"subs", s.countSubs(),
-				)
-				if s.countSubs() == 0 {
-					return nil
-				}
-				metrics.SubscriptionResumes.WithLabelValues("inj_ws_upstream_close").Inc()
-				break forward
-			}
-		}
+func newInjAdapter() *injAdapter {
+	return &injAdapter{
+		subs:    make(map[string]*InjSub),
+		pending: make(map[string]*InjSub),
+		byUpID:  make(map[string]*InjSub),
 	}
 }
 
-func (s *InjSession) closeClient(code int, msg string) {
-	if !s.closed.CompareAndSwap(false, true) {
-		return
-	}
-	s.clientWriteMu.Lock()
-	_ = s.client.WriteControl(
-		websocket.CloseMessage,
-		websocket.FormatCloseMessage(code, msg),
-		time.Now().Add(2*time.Second),
-	)
-	s.clientWriteMu.Unlock()
-	_ = s.client.Close()
-}
-
-// dialUpstream picks the next selector candidate and opens a WS to its
-// /injstream-ws endpoint. The endpoint key reuses ProtoChainStream — a
-// chainstream-capable backend is assumed to expose /injstream-ws on the
-// same host but a different port; operators put the WS URL in the
-// `chainstream` endpoint slot when they want it routable by stitch.
-func (s *InjSession) dialUpstream(ctx context.Context) bool {
-	candidates := s.selector.Candidates(types.RouteKey{
+// DialRouteKey reuses ProtoChainStream — a chainstream-capable backend is
+// assumed to expose /injstream-ws on the same host but a different port;
+// operators put the WS URL in the `chainstream` endpoint slot when they
+// want it routable by stitch.
+func (a *injAdapter) DialRouteKey() types.RouteKey {
+	return types.RouteKey{
 		Protocol: types.ProtoChainStream,
 		Method:   "inj_ws_session",
 		Class:    types.ClassLatest,
-	})
-	for _, b := range candidates {
-		ep := b.Endpoint(types.ProtoChainStream)
-		if ep == "" {
-			continue
-		}
-		addr := injWSURL(ep)
-		dialCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		conn, _, err := s.dialer.DialContext(dialCtx, addr, nil)
-		cancel()
-		if err != nil {
-			log.FromCtx(ctx).Warn("inj_ws: upstream dial failed", "backend", b.Name, "err", err.Error())
-			continue
-		}
-		conn.SetReadDeadline(time.Now().Add(60 * time.Second))
-		conn.SetPongHandler(func(string) error {
-			return conn.SetReadDeadline(time.Now().Add(60 * time.Second))
-		})
-		s.upstream.Store(conn)
-		s.upBackend.Store(b.Name)
-		log.FromCtx(ctx).Info("inj_ws: upstream connected", "session_id", s.id, "backend", b.Name)
-		return true
-	}
-	return false
-}
-
-func (s *InjSession) tearDownUpstream() {
-	if c := s.upstream.Swap(nil); c != nil {
-		_ = c.Close()
 	}
 }
 
-// clientReader pumps frames from the client into clientCh until close.
-// Sends race s.done: once Run returns nothing drains clientCh, and a conn
-// close only unblocks ReadMessage — a full buffer would otherwise strand
-// this goroutine on the send forever.
-func (s *InjSession) clientReader(_ context.Context, clientCh chan<- []byte, errCh chan<- error) {
-	defer close(clientCh)
-	for {
-		_, msg, err := s.client.ReadMessage()
-		if err != nil {
-			errCh <- err // cap-1, single send ever — never blocks
-			return
-		}
-		select {
-		case clientCh <- msg:
-		case <-s.done:
-			return
-		}
-	}
+func (a *injAdapter) NormalizeEndpoint(ep string) string { return wsurl.InjStreamURL(ep) }
+
+func (a *injAdapter) SessionLabels() (string, string) {
+	return string(types.ProtoChainStream), "inj_ws"
 }
 
-func (s *InjSession) upstreamReader(ctx context.Context) error {
-	conn := s.upstream.Load()
-	if conn == nil {
-		return errors.New("no upstream")
-	}
-	for {
-		_, msg, err := conn.ReadMessage()
-		if err != nil {
-			return err
-		}
-		if err := s.routeUpstreamFrame(ctx, msg); err != nil {
-			return err
-		}
-	}
-}
+func (a *injAdapter) ResumeReason() string { return "inj_ws_upstream_close" }
 
-func (s *InjSession) routeClientFrame(msg []byte) error {
+// HandleClientFrame intercepts subscribe/unsubscribe; everything else —
+// including frames we cannot parse — is forwarded verbatim so upstream
+// produces the protocol's own error responses.
+func (a *injAdapter) HandleClientFrame(e *engine, msg []byte) error {
 	var probe struct {
 		ID     json.RawMessage `json:"id"`
 		Method string          `json:"method"`
@@ -241,36 +147,42 @@ func (s *InjSession) routeClientFrame(msg []byte) error {
 	}
 	if err := json.Unmarshal(msg, &probe); err != nil {
 		// Forward verbatim if we can't parse; let upstream handle errors.
-		return s.upstreamWrite(msg)
+		return e.upstreamWrite(msg)
 	}
 	switch probe.Method {
 	case "subscribe":
-		return s.handleSubscribe(probe.ID, probe.Params)
+		return a.handleSubscribe(e, probe.ID, probe.Params)
 	case "unsubscribe":
-		return s.handleUnsubscribe(probe.ID, probe.Params)
+		return a.handleUnsubscribe(e, probe.ID, probe.Params)
 	default:
-		return s.upstreamWrite(msg)
+		return e.upstreamWrite(msg)
 	}
 }
 
 // handleSubscribe registers the sub locally, reissues to upstream with
 // our internal JSON-RPC id, and awaits the ack.
-func (s *InjSession) handleSubscribe(clientID, params json.RawMessage) error {
+func (a *injAdapter) handleSubscribe(e *engine, clientID, params json.RawMessage) error {
 	sp, ok := ParseInjSubscribeParams(params)
 	if !ok {
-		return s.clientReplyError(clientID, -32602, "subscribe params: missing subscription_id or filter")
+		return e.clientReplyError(clientID, -32602, "subscribe params: missing subscription_id or filter")
 	}
-	internalID := s.nextID()
+	internalID := a.nextID()
 	sub := &InjSub{
 		SubscriptionID:  sp.SubscriptionID,
 		ClientJSONRPCID: append(json.RawMessage(nil), clientID...),
 		Filter:          append(json.RawMessage(nil), sp.Filter...),
 		UpstreamID:      internalID,
 	}
-	s.mu.Lock()
-	s.subs[sp.SubscriptionID] = sub
-	s.pending[internalID] = sub
-	s.mu.Unlock()
+	a.mu.Lock()
+	if old, exists := a.subs[sp.SubscriptionID]; exists {
+		// Re-subscribe under the same id replaces the sub; drop the stale
+		// correlation so old-id notifications can't match the dead one.
+		delete(a.byUpID, old.UpstreamID)
+	}
+	a.subs[sp.SubscriptionID] = sub
+	a.pending[internalID] = sub
+	a.byUpID[internalID] = sub
+	a.mu.Unlock()
 
 	out, err := json.Marshal(map[string]any{
 		"jsonrpc": "2.0",
@@ -281,98 +193,90 @@ func (s *InjSession) handleSubscribe(clientID, params json.RawMessage) error {
 	if err != nil {
 		return err
 	}
-	return s.upstreamWrite(out)
+	return e.upstreamWrite(out)
 }
 
-func (s *InjSession) handleUnsubscribe(clientID, params json.RawMessage) error {
+// handleUnsubscribe forgets the sub, forwards the unsubscribe upstream,
+// and always replies "success" to the client afterwards.
+func (a *injAdapter) handleUnsubscribe(e *engine, clientID, params json.RawMessage) error {
 	up, ok := ParseInjUnsubscribeParams(params)
 	if !ok {
-		return s.clientReplyError(clientID, -32602, "unsubscribe params: missing subscription_id")
+		return e.clientReplyError(clientID, -32602, "unsubscribe params: missing subscription_id")
 	}
-	s.mu.Lock()
-	delete(s.subs, up.SubscriptionID)
-	s.mu.Unlock()
+	a.mu.Lock()
+	if sub, exists := a.subs[up.SubscriptionID]; exists {
+		delete(a.subs, up.SubscriptionID)
+		delete(a.byUpID, sub.UpstreamID)
+	}
+	a.mu.Unlock()
 	out, _ := json.Marshal(map[string]any{
 		"jsonrpc": "2.0",
-		"id":      s.nextID(),
+		"id":      a.nextID(),
 		"method":  "unsubscribe",
 		"params":  map[string]any{"subscription_id": up.SubscriptionID},
 	})
-	if err := s.upstreamWrite(out); err != nil {
+	if err := e.upstreamWrite(out); err != nil {
 		return err
 	}
 	// Reply success to client.
-	out2, _ := json.Marshal(map[string]any{
-		"jsonrpc": "2.0",
-		"id":      json.RawMessage(clientID),
-		"result":  "success",
-	})
-	return s.clientWrite(out2)
+	return e.clientReplyResult(clientID, "success")
 }
 
-func (s *InjSession) routeUpstreamFrame(_ context.Context, msg []byte) error {
+// HandleUpstreamFrame classifies a frame from upstream:
+//   - result is a string → subscribe ack: resolve pending; forward the
+//     first-time ack under the client's id, absorb resume acks
+//   - result is an object with block_height → notification: match by
+//     internal id, dedup against the cursor, rewrite the id, forward
+//   - anything else → forward verbatim
+func (a *injAdapter) HandleUpstreamFrame(e *engine, msg []byte) error {
 	var probe struct {
 		ID     json.RawMessage `json:"id"`
 		Result json.RawMessage `json:"result"`
 	}
 	if err := json.Unmarshal(msg, &probe); err != nil {
-		return s.clientWrite(msg)
+		return e.clientWrite(msg)
 	}
-	resTrim := bytesTrim(probe.Result)
+	resTrim := bytes.TrimSpace(probe.Result)
 
 	// Subscribe ack: result is the literal string "success".
 	if len(resTrim) > 0 && resTrim[0] == '"' {
 		idStr := unquoteID(probe.ID)
-		s.mu.Lock()
-		sub, ok := s.pending[idStr]
+		a.mu.Lock()
+		sub, ok := a.pending[idStr]
 		if ok {
-			delete(s.pending, idStr)
+			delete(a.pending, idStr)
 		}
-		s.mu.Unlock()
+		a.mu.Unlock()
 		if !ok {
 			// Unknown id — pass through.
-			return s.clientWrite(msg)
+			return e.clientWrite(msg)
 		}
 		// First-time subscribe: forward ack with the client's original id.
 		// Re-issue (resume): silently absorb.
-		first := sub.Cursor.IsZero()
-		if !first {
+		if !sub.Cursor.IsZero() {
 			return nil
 		}
-		ack, _ := json.Marshal(map[string]any{
-			"jsonrpc": "2.0",
-			"id":      json.RawMessage(sub.ClientJSONRPCID),
-			"result":  "success",
-		})
-		return s.clientWrite(ack)
+		return e.clientReplyResult(sub.ClientJSONRPCID, "success")
 	}
 
 	// Notification: result is an object with block_height.
 	notif, ok := ParseInjNotification(msg)
 	if !ok {
 		// Unknown frame shape — forward verbatim.
-		return s.clientWrite(msg)
+		return e.clientWrite(msg)
 	}
 	idStr := unquoteID(notif.ID)
 
-	s.mu.Lock()
-	var sub *InjSub
-	// Notifications carry whatever id we used to subscribe. The sub's
-	// UpstreamID is the current outgoing id (mutated on resume), so we
-	// match against that. Fall back to the pending map for the brief
-	// window between subscribe write and ack drain.
-	for _, candidate := range s.subs {
-		if candidate.UpstreamID == idStr {
-			sub = candidate
-			break
-		}
-	}
+	a.mu.Lock()
+	// Notifications carry whatever id we used to subscribe; byUpID tracks
+	// each sub under its current outgoing id (mutated on resume). Fall
+	// back to the pending map for the brief window between subscribe
+	// write and ack drain.
+	sub := a.byUpID[idStr]
 	if sub == nil {
-		if pendingSub, ok := s.pending[idStr]; ok {
-			sub = pendingSub
-		}
+		sub = a.pending[idStr]
 	}
-	s.mu.Unlock()
+	a.mu.Unlock()
 	if sub == nil {
 		metrics.SubscriptionDroppedNotifs.WithLabelValues(string(types.ProtoChainStream), "unknown_sub").Inc()
 		return nil // drop unknown
@@ -390,120 +294,68 @@ func (s *InjSession) routeUpstreamFrame(_ context.Context, msg []byte) error {
 	}
 
 	if !notif.Cursor.IsZero() {
-		s.mu.Lock()
+		a.mu.Lock()
 		if notif.Cursor.LessEq(sub.Cursor) {
-			s.mu.Unlock()
+			a.mu.Unlock()
 			return nil
 		}
 		sub.Cursor = notif.Cursor
-		s.mu.Unlock()
+		a.mu.Unlock()
 	}
-	return s.clientWrite(rewritten)
+	return e.clientWrite(rewritten)
 }
 
-// replaySubs re-issues every active subscription on the freshly-dialed
-// upstream. The upstream replies "success" (which routeUpstreamFrame
+// ReplaySubs re-issues every active subscription on the freshly-dialed
+// upstream. The upstream replies "success" (which HandleUpstreamFrame
 // silently absorbs because Cursor is non-zero). Subsequent notifications
-// match via the internal id we attach below.
-func (s *InjSession) replaySubs(ctx context.Context) {
-	s.mu.Lock()
-	subs := make([]*InjSub, 0, len(s.subs))
-	for _, sub := range s.subs {
+// match via the fresh internal id bound below.
+func (a *injAdapter) ReplaySubs(ctx context.Context, e *engine) {
+	a.mu.Lock()
+	subs := make([]*InjSub, 0, len(a.subs))
+	for _, sub := range a.subs {
 		subs = append(subs, sub)
 	}
-	s.mu.Unlock()
+	a.mu.Unlock()
 
 	for _, sub := range subs {
-		internalID := s.nextID()
-		s.mu.Lock()
+		internalID := a.nextID()
+		a.mu.Lock()
 		// Forget the previous upstream id; new id replaces it.
+		delete(a.byUpID, sub.UpstreamID)
 		sub.UpstreamID = internalID
-		s.pending[internalID] = sub
-		s.mu.Unlock()
+		a.pending[internalID] = sub
+		a.byUpID[internalID] = sub
+		a.mu.Unlock()
 		out, _ := json.Marshal(map[string]any{
 			"jsonrpc": "2.0",
 			"id":      internalID,
 			"method":  "subscribe",
 			"params":  map[string]any{"subscription_id": sub.SubscriptionID, "filter": json.RawMessage(sub.Filter)},
 		})
-		if err := s.upstreamWrite(out); err != nil {
+		if err := e.upstreamWrite(out); err != nil {
 			log.FromCtx(ctx).Warn("inj_ws: replay write failed", "err", err.Error())
 			return
 		}
 	}
 }
 
-func (s *InjSession) countSubs() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return len(s.subs)
+// ResumableSubs reports the live sub count — every /injstream-ws sub is
+// resumable (cursor dedup handles the overlap), so the engine reconnects
+// whenever any sub is active.
+func (a *injAdapter) ResumableSubs() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return len(a.subs)
 }
 
-func (s *InjSession) nextID() string {
-	return fmt.Sprintf("stitch_inj_%d", s.idSeq.Add(1))
-}
-
-func (s *InjSession) upstreamWrite(msg []byte) error {
-	conn := s.upstream.Load()
-	if conn == nil {
-		return errors.New("no upstream")
-	}
-	s.upstreamWriteMu.Lock()
-	defer s.upstreamWriteMu.Unlock()
-	if err := conn.SetWriteDeadline(time.Now().Add(10 * time.Second)); err != nil {
-		return err
-	}
-	return conn.WriteMessage(websocket.TextMessage, msg)
-}
-
-func (s *InjSession) clientWrite(msg []byte) error {
-	s.clientWriteMu.Lock()
-	defer s.clientWriteMu.Unlock()
-	if err := s.client.SetWriteDeadline(time.Now().Add(10 * time.Second)); err != nil {
-		return err
-	}
-	return s.client.WriteMessage(websocket.TextMessage, msg)
-}
-
-func (s *InjSession) clientReplyError(id json.RawMessage, code int, msg string) error {
-	out, _ := json.Marshal(map[string]any{
-		"jsonrpc": "2.0",
-		"id":      json.RawMessage(id),
-		"error":   map[string]any{"code": code, "message": msg},
-	})
-	return s.clientWrite(out)
-}
-
-// injWSURL normalizes the operator-provided endpoint URL. ChainStream
-// gRPC endpoints are bare host:port; /injstream-ws is HTTP+WS so we need
-// a ws:// or wss:// scheme. If the operator provides one of those
-// already, use as-is; otherwise prefix ws:// and append /injstream-ws.
-func injWSURL(s string) string {
-	switch {
-	case len(s) > 5 && s[:5] == "wss:/":
-		return s
-	case len(s) > 5 && s[:5] == "ws://":
-		return s
-	case len(s) > 7 && s[:7] == "https:/":
-		return "wss://" + s[8:] + "/injstream-ws"
-	case len(s) > 7 && s[:7] == "http://":
-		return "ws://" + s[7:] + "/injstream-ws"
-	}
-	// Bare host:port → assume insecure ws.
-	return "ws://" + s + "/injstream-ws"
-}
-
-func bytesTrim(b []byte) []byte {
-	for len(b) > 0 && (b[0] == ' ' || b[0] == '\t' || b[0] == '\n' || b[0] == '\r') {
-		b = b[1:]
-	}
-	return b
+func (a *injAdapter) nextID() string {
+	return fmt.Sprintf("stitch_inj_%d", a.idSeq.Add(1))
 }
 
 // unquoteID converts a JSON-RPC id (which may be a number, a quoted
 // string, or null) into a comparable string key. We treat "stitch_inj_1"
 // and stitch_inj_1 as the same id so the pending map keys can be plain
-// Go strings.
+// Go strings. Also used by the hub's ack matching.
 func unquoteID(id json.RawMessage) string {
 	s := strings.TrimSpace(string(id))
 	if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {

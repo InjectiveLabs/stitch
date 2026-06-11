@@ -18,7 +18,6 @@ import (
 	"context"
 	"errors"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -127,21 +126,5 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	})
 	if err := sess.Run(ctx); err != nil {
 		log.FromCtx(ctx).Debug("eth_ws: session ended", "err", err.Error())
-	}
-}
-
-// upstreamURL is preserved for the legacy test that asserts URL
-// normalization. Session.normalizeWS is the one that gets used at
-// runtime.
-func upstreamURL(s string) string {
-	switch {
-	case strings.HasPrefix(s, "ws://"), strings.HasPrefix(s, "wss://"):
-		return s
-	case strings.HasPrefix(s, "http://"):
-		return "ws://" + strings.TrimPrefix(s, "http://")
-	case strings.HasPrefix(s, "https://"):
-		return "wss://" + strings.TrimPrefix(s, "https://")
-	default:
-		return s
 	}
 }

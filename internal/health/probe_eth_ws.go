@@ -18,6 +18,7 @@ import (
 	"github.com/decentrio/stitch/internal/log"
 	"github.com/decentrio/stitch/internal/metrics"
 	"github.com/decentrio/stitch/internal/types"
+	"github.com/decentrio/stitch/internal/wsurl"
 )
 
 // EthWSProber maintains a long-lived eth_subscribe newHeads stream per
@@ -256,7 +257,7 @@ var errBackendRemoved = errors.New("backend removed from registry")
 // reading frames and pushing each header into the health registry. Returns
 // on any I/O error or when ctx is cancelled.
 func (p *EthWSProber) subscribeAndStream(ctx context.Context, name, ep string) error {
-	wsURL := normalizeWS(ep)
+	wsURL := wsurl.Normalize(ep)
 	conn, _, err := p.dialer.DialContext(ctx, wsURL, nil)
 	if err != nil {
 		return fmt.Errorf("dial %s: %w", wsURL, err)
@@ -370,19 +371,4 @@ func parseNewHeadsNotification(raw []byte) (int64, bool) {
 		return 0, false
 	}
 	return h, true
-}
-
-// normalizeWS maps http(s):// to ws(s):// for endpoints configured as
-// HTTP URLs; pass-through for already-ws URLs or unknown schemes.
-func normalizeWS(ep string) string {
-	switch {
-	case strings.HasPrefix(ep, "ws://"), strings.HasPrefix(ep, "wss://"):
-		return ep
-	case strings.HasPrefix(ep, "http://"):
-		return "ws://" + strings.TrimPrefix(ep, "http://")
-	case strings.HasPrefix(ep, "https://"):
-		return "wss://" + strings.TrimPrefix(ep, "https://")
-	default:
-		return ep
-	}
 }

@@ -1,6 +1,7 @@
 package subscription
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -15,6 +16,7 @@ import (
 	"github.com/decentrio/stitch/internal/metrics"
 	"github.com/decentrio/stitch/internal/selector"
 	"github.com/decentrio/stitch/internal/types"
+	"github.com/decentrio/stitch/internal/wsurl"
 )
 
 // Hub multiplexes /injstream-ws upstreams. Multiple client sessions that
@@ -266,7 +268,7 @@ func (u *hubUpstream) dial(ctx context.Context) bool {
 		if ep == "" {
 			continue
 		}
-		addr := injWSURLNormalize(ep)
+		addr := wsurl.InjStreamURL(ep)
 		dialCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		conn, _, err := u.hub.dialer.DialContext(dialCtx, addr, nil)
 		cancel()
@@ -347,7 +349,7 @@ func (u *hubUpstream) handleFrame(msg []byte) {
 	if err := json.Unmarshal(msg, &probe); err != nil {
 		return
 	}
-	res := bytes_TrimSpace(probe.Result)
+	res := bytes.TrimSpace(probe.Result)
 	// Subscribe ack: result is a string ("success"). Drain pending; do
 	// NOT forward (the per-client ack was already sent at attach time).
 	if len(res) > 0 && res[0] == '"' {
@@ -425,31 +427,4 @@ func (u *hubUpstream) failAllClients(reason string) {
 		c.Detach()
 	}
 	_ = reason
-}
-
-// bytes_TrimSpace is a tiny duplicate to avoid an extra import in the
-// hub file; the inj_session has the same helper privately. Keeping
-// them separate avoids cross-file refactors during phase 5d.
-func bytes_TrimSpace(b []byte) []byte {
-	for len(b) > 0 && (b[0] == ' ' || b[0] == '\t' || b[0] == '\n' || b[0] == '\r') {
-		b = b[1:]
-	}
-	for len(b) > 0 && (b[len(b)-1] == ' ' || b[len(b)-1] == '\t' || b[len(b)-1] == '\n' || b[len(b)-1] == '\r') {
-		b = b[:len(b)-1]
-	}
-	return b
-}
-
-// injWSURLNormalize duplicates the small normalization helper used in
-// inj_session so the hub doesn't import the session's internals.
-func injWSURLNormalize(s string) string {
-	switch {
-	case len(s) > 5 && (s[:5] == "wss:/" || s[:5] == "ws://"):
-		return s
-	case len(s) > 7 && s[:7] == "https:/":
-		return "wss://" + s[8:] + "/injstream-ws"
-	case len(s) > 7 && s[:7] == "http://":
-		return "ws://" + s[7:] + "/injstream-ws"
-	}
-	return "ws://" + s + "/injstream-ws"
 }
