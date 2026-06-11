@@ -1,6 +1,27 @@
 package subscription
 
-import "google.golang.org/protobuf/encoding/protowire"
+import (
+	"encoding/json"
+	"strings"
+
+	"google.golang.org/protobuf/encoding/protowire"
+)
+
+// unquoteID converts a JSON-RPC id (which may be a number, a quoted
+// string, or null) into a comparable string key. We treat "stitch_inj_1"
+// and stitch_inj_1 as the same id so the pending map keys can be plain
+// Go strings. Shared by both session adapters and the hub's ack matching.
+func unquoteID(id json.RawMessage) string {
+	s := strings.TrimSpace(string(id))
+	if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
+		var u string
+		if err := json.Unmarshal([]byte(s), &u); err == nil {
+			return u
+		}
+		return s[1 : len(s)-1]
+	}
+	return s
+}
 
 // ExtractStreamResponseHeight reads the block_height field (proto field 1,
 // varint) from a marshaled injective.stream.v*.StreamResponse without

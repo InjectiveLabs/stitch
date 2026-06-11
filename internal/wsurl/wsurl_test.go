@@ -42,6 +42,9 @@ func TestInjStreamURL(t *testing.T) {
 		// http(s) → ws(s) with the canonical path appended.
 		{"http://example:1996", "ws://example:1996/injstream-ws"},
 		{"https://example:1996", "wss://example:1996/injstream-ws"},
+		// Path-carrying http URLs keep their path; /injstream-ws is
+		// appended after it (the documented behavior).
+		{"http://x/foo", "ws://x/foo/injstream-ws"},
 		// Bare host:port (the chainstream endpoint slot's native form).
 		{"example:9999", "ws://example:9999/injstream-ws"},
 		{"127.0.0.1:1996", "ws://127.0.0.1:1996/injstream-ws"},

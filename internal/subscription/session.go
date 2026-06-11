@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -42,8 +41,10 @@ type Sub struct {
 
 // SessionConfig configures a session at construction.
 type SessionConfig struct {
-	Selector         selector.Selector
-	Dialer           *websocket.Dialer
+	Selector selector.Selector
+	Dialer   *websocket.Dialer
+	// HandshakeTimeout bounds the default upstream dialer's WS handshake;
+	// used only when Dialer is nil.
 	HandshakeTimeout time.Duration
 }
 
@@ -52,7 +53,7 @@ type SessionConfig struct {
 func NewSession(client *websocket.Conn, cfg SessionConfig) *Session {
 	ad := newEthAdapter()
 	return &Session{
-		eng: newEngine(client, cfg.Selector, cfg.Dialer, ad),
+		eng: newEngine(client, cfg.Selector, cfg.Dialer, cfg.HandshakeTimeout, ad),
 		ad:  ad,
 	}
 }
@@ -126,7 +127,7 @@ func (a *ethAdapter) ResumeReason() string { return "upstream_close" }
 //     stitch-issued copy to upstream
 //   - intercepts an eth_unsubscribe by synthetic ID and rewrites it
 //   - or forwards verbatim
-func (a *ethAdapter) HandleClientFrame(e *engine, msg []byte) error {
+func (a *ethAdapter) HandleClientFrame(io sessionIO, msg []byte) error {
 	var probe struct {
 		ID     json.RawMessage `json:"id"`
 		Method string          `json:"method"`
@@ -136,18 +137,18 @@ func (a *ethAdapter) HandleClientFrame(e *engine, msg []byte) error {
 
 	switch probe.Method {
 	case "eth_subscribe":
-		return a.handleClientSubscribe(e, probe.ID, probe.Params)
+		return a.handleClientSubscribe(io, probe.ID, probe.Params)
 	case "eth_unsubscribe":
-		return a.handleClientUnsubscribe(e, probe.ID, probe.Params)
+		return a.handleClientUnsubscribe(io, probe.ID, probe.Params)
 	default:
-		return e.upstreamWrite(msg)
+		return io.upstreamWrite(msg)
 	}
 }
 
 // handleClientSubscribe registers a pending subscription with a fresh
 // stitch JSON-RPC id, forwards to upstream. On the upstream response,
 // we'll mint the synthetic ID and reply to the client.
-func (a *ethAdapter) handleClientSubscribe(e *engine, clientID, params json.RawMessage) error {
+func (a *ethAdapter) handleClientSubscribe(io sessionIO, clientID, params json.RawMessage) error {
 	kind := readSubscribeKind(params)
 	syn := a.mintSynthetic()
 	internalID := a.nextID()
@@ -174,13 +175,13 @@ func (a *ethAdapter) handleClientSubscribe(e *engine, clientID, params json.RawM
 	if err != nil {
 		return err
 	}
-	return e.upstreamWrite(out)
+	return io.upstreamWrite(out)
 }
 
 // handleClientUnsubscribe maps the synthetic ID back to upstream, sends
 // the upstream-form unsubscribe, replies "true" to the client, and forgets
 // the sub. Unknown ids reply result=false.
-func (a *ethAdapter) handleClientUnsubscribe(e *engine, clientID, params json.RawMessage) error {
+func (a *ethAdapter) handleClientUnsubscribe(io sessionIO, clientID, params json.RawMessage) error {
 	id := firstStringParam(params)
 	a.mu.Lock()
 	sub, ok := a.subs[id]
@@ -195,7 +196,7 @@ func (a *ethAdapter) handleClientUnsubscribe(e *engine, clientID, params json.Ra
 	a.mu.Unlock()
 
 	if !ok {
-		return e.clientReplyBool(clientID, false)
+		return io.clientReplyBool(clientID, false)
 	}
 	if upID != "" {
 		out, _ := json.Marshal(map[string]any{
@@ -204,16 +205,16 @@ func (a *ethAdapter) handleClientUnsubscribe(e *engine, clientID, params json.Ra
 			"method":  "eth_unsubscribe",
 			"params":  []string{upID},
 		})
-		_ = e.upstreamWrite(out)
+		_ = io.upstreamWrite(out)
 	}
-	return e.clientReplyBool(clientID, true)
+	return io.clientReplyBool(clientID, true)
 }
 
 // HandleUpstreamFrame inspects a frame from upstream:
 //   - notification: translate id, dedup, forward
 //   - response with our internal id: bind synthetic, reply to client
 //   - other response: forward verbatim (may be eth_call etc.)
-func (a *ethAdapter) HandleUpstreamFrame(e *engine, msg []byte) error {
+func (a *ethAdapter) HandleUpstreamFrame(io sessionIO, msg []byte) error {
 	var probe struct {
 		ID     json.RawMessage `json:"id"`
 		Method string          `json:"method"`
@@ -223,10 +224,10 @@ func (a *ethAdapter) HandleUpstreamFrame(e *engine, msg []byte) error {
 	_ = json.Unmarshal(msg, &probe)
 
 	if probe.Method == "eth_subscription" {
-		return a.handleUpstreamNotification(e, msg)
+		return a.handleUpstreamNotification(io, msg)
 	}
 	if len(probe.ID) > 0 {
-		idStr := strings.Trim(string(probe.ID), `"`)
+		idStr := unquoteID(probe.ID)
 		a.mu.Lock()
 		pending, ok := a.pending[idStr]
 		if ok {
@@ -234,13 +235,13 @@ func (a *ethAdapter) HandleUpstreamFrame(e *engine, msg []byte) error {
 		}
 		a.mu.Unlock()
 		if ok {
-			return a.handleUpstreamSubscribeResp(e, pending, probe.Result)
+			return a.handleUpstreamSubscribeResp(io, pending, probe.Result)
 		}
 	}
-	return e.clientWrite(msg)
+	return io.clientWrite(msg)
 }
 
-func (a *ethAdapter) handleUpstreamNotification(e *engine, msg []byte) error {
+func (a *ethAdapter) handleUpstreamNotification(io sessionIO, msg []byte) error {
 	// Parse to find the upstream sub ID.
 	var env struct {
 		Params struct {
@@ -248,7 +249,7 @@ func (a *ethAdapter) handleUpstreamNotification(e *engine, msg []byte) error {
 		} `json:"params"`
 	}
 	if err := json.Unmarshal(msg, &env); err != nil {
-		return e.clientWrite(msg)
+		return io.clientWrite(msg)
 	}
 	upID := env.Params.Subscription
 
@@ -286,14 +287,14 @@ func (a *ethAdapter) handleUpstreamNotification(e *engine, msg []byte) error {
 		sub.Cursor = parsed.Cursor
 		a.mu.Unlock()
 	}
-	return e.clientWrite(rewritten)
+	return io.clientWrite(rewritten)
 }
 
-func (a *ethAdapter) handleUpstreamSubscribeResp(e *engine, sub *Sub, result json.RawMessage) error {
+func (a *ethAdapter) handleUpstreamSubscribeResp(io sessionIO, sub *Sub, result json.RawMessage) error {
 	var upID string
 	if err := json.Unmarshal(result, &upID); err != nil {
 		// Subscribe failed — propagate error to client.
-		return e.clientReplyError(sub.ClientID, -32603, "upstream subscribe failed")
+		return io.clientReplyError(sub.ClientID, -32603, "upstream subscribe failed")
 	}
 	a.mu.Lock()
 	sub.UpstreamID = upID
@@ -306,15 +307,15 @@ func (a *ethAdapter) handleUpstreamSubscribeResp(e *engine, sub *Sub, result jso
 	if !first {
 		return nil // resume: don't re-reply; the original response already went out
 	}
-	return e.clientReplyResult(clientID, syn)
+	return io.clientReplyResult(clientID, syn)
 }
 
 // ReplaySubs is called after a (re)connect. For each resumable sub,
 // re-issue eth_subscribe with the original params; the upstream's
 // response binds a fresh upstream id. The stale upstream-id mapping is
 // purged before re-issue so a late notification from the dead upstream
-// can't sneak through.
-func (a *ethAdapter) ReplaySubs(_ context.Context, e *engine) {
+// can't sneak through. Aborts on the first write error and returns it.
+func (a *ethAdapter) ReplaySubs(_ context.Context, io sessionIO) error {
 	a.mu.Lock()
 	subs := make([]*Sub, 0, len(a.subs))
 	for _, sub := range a.subs {
@@ -331,6 +332,9 @@ func (a *ethAdapter) ReplaySubs(_ context.Context, e *engine) {
 	for _, sub := range subs {
 		internalID := a.nextID()
 		a.mu.Lock()
+		// Stale pending entries from never-acked epochs are deliberately
+		// retained: they serve the late-notification fallback window, ids
+		// never collide, and the cost is memory-only, bounded by flap count.
 		a.pending[internalID] = sub
 		a.mu.Unlock()
 		out, _ := json.Marshal(map[string]any{
@@ -339,10 +343,11 @@ func (a *ethAdapter) ReplaySubs(_ context.Context, e *engine) {
 			"method":  "eth_subscribe",
 			"params":  json.RawMessage(sub.Params),
 		})
-		if err := e.upstreamWrite(out); err != nil {
-			return
+		if err := io.upstreamWrite(out); err != nil {
+			return err
 		}
 	}
+	return nil
 }
 
 // ResumableSubs counts subs that survive a backend swap. Zero means the

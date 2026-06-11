@@ -5,14 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
 
-	"github.com/decentrio/stitch/internal/log"
 	"github.com/decentrio/stitch/internal/metrics"
 	"github.com/decentrio/stitch/internal/selector"
 	"github.com/decentrio/stitch/internal/types"
@@ -49,8 +47,10 @@ type InjSub struct {
 
 // InjSessionConfig configures a session at construction.
 type InjSessionConfig struct {
-	Selector         selector.Selector
-	Dialer           *websocket.Dialer
+	Selector selector.Selector
+	Dialer   *websocket.Dialer
+	// HandshakeTimeout bounds the default upstream dialer's WS handshake;
+	// used only when Dialer is nil.
 	HandshakeTimeout time.Duration
 }
 
@@ -58,7 +58,7 @@ type InjSessionConfig struct {
 func NewInjSession(client *websocket.Conn, cfg InjSessionConfig) *InjSession {
 	ad := newInjAdapter()
 	return &InjSession{
-		eng: newEngine(client, cfg.Selector, cfg.Dialer, ad),
+		eng: newEngine(client, cfg.Selector, cfg.Dialer, cfg.HandshakeTimeout, ad),
 		ad:  ad,
 	}
 }
@@ -139,7 +139,7 @@ func (a *injAdapter) ResumeReason() string { return "inj_ws_upstream_close" }
 // HandleClientFrame intercepts subscribe/unsubscribe; everything else —
 // including frames we cannot parse — is forwarded verbatim so upstream
 // produces the protocol's own error responses.
-func (a *injAdapter) HandleClientFrame(e *engine, msg []byte) error {
+func (a *injAdapter) HandleClientFrame(io sessionIO, msg []byte) error {
 	var probe struct {
 		ID     json.RawMessage `json:"id"`
 		Method string          `json:"method"`
@@ -147,24 +147,24 @@ func (a *injAdapter) HandleClientFrame(e *engine, msg []byte) error {
 	}
 	if err := json.Unmarshal(msg, &probe); err != nil {
 		// Forward verbatim if we can't parse; let upstream handle errors.
-		return e.upstreamWrite(msg)
+		return io.upstreamWrite(msg)
 	}
 	switch probe.Method {
 	case "subscribe":
-		return a.handleSubscribe(e, probe.ID, probe.Params)
+		return a.handleSubscribe(io, probe.ID, probe.Params)
 	case "unsubscribe":
-		return a.handleUnsubscribe(e, probe.ID, probe.Params)
+		return a.handleUnsubscribe(io, probe.ID, probe.Params)
 	default:
-		return e.upstreamWrite(msg)
+		return io.upstreamWrite(msg)
 	}
 }
 
 // handleSubscribe registers the sub locally, reissues to upstream with
 // our internal JSON-RPC id, and awaits the ack.
-func (a *injAdapter) handleSubscribe(e *engine, clientID, params json.RawMessage) error {
+func (a *injAdapter) handleSubscribe(io sessionIO, clientID, params json.RawMessage) error {
 	sp, ok := ParseInjSubscribeParams(params)
 	if !ok {
-		return e.clientReplyError(clientID, -32602, "subscribe params: missing subscription_id or filter")
+		return io.clientReplyError(clientID, -32602, "subscribe params: missing subscription_id or filter")
 	}
 	internalID := a.nextID()
 	sub := &InjSub{
@@ -193,15 +193,15 @@ func (a *injAdapter) handleSubscribe(e *engine, clientID, params json.RawMessage
 	if err != nil {
 		return err
 	}
-	return e.upstreamWrite(out)
+	return io.upstreamWrite(out)
 }
 
 // handleUnsubscribe forgets the sub, forwards the unsubscribe upstream,
 // and always replies "success" to the client afterwards.
-func (a *injAdapter) handleUnsubscribe(e *engine, clientID, params json.RawMessage) error {
+func (a *injAdapter) handleUnsubscribe(io sessionIO, clientID, params json.RawMessage) error {
 	up, ok := ParseInjUnsubscribeParams(params)
 	if !ok {
-		return e.clientReplyError(clientID, -32602, "unsubscribe params: missing subscription_id")
+		return io.clientReplyError(clientID, -32602, "unsubscribe params: missing subscription_id")
 	}
 	a.mu.Lock()
 	if sub, exists := a.subs[up.SubscriptionID]; exists {
@@ -215,11 +215,11 @@ func (a *injAdapter) handleUnsubscribe(e *engine, clientID, params json.RawMessa
 		"method":  "unsubscribe",
 		"params":  map[string]any{"subscription_id": up.SubscriptionID},
 	})
-	if err := e.upstreamWrite(out); err != nil {
+	if err := io.upstreamWrite(out); err != nil {
 		return err
 	}
 	// Reply success to client.
-	return e.clientReplyResult(clientID, "success")
+	return io.clientReplyResult(clientID, "success")
 }
 
 // HandleUpstreamFrame classifies a frame from upstream:
@@ -228,13 +228,13 @@ func (a *injAdapter) handleUnsubscribe(e *engine, clientID, params json.RawMessa
 //   - result is an object with block_height → notification: match by
 //     internal id, dedup against the cursor, rewrite the id, forward
 //   - anything else → forward verbatim
-func (a *injAdapter) HandleUpstreamFrame(e *engine, msg []byte) error {
+func (a *injAdapter) HandleUpstreamFrame(io sessionIO, msg []byte) error {
 	var probe struct {
 		ID     json.RawMessage `json:"id"`
 		Result json.RawMessage `json:"result"`
 	}
 	if err := json.Unmarshal(msg, &probe); err != nil {
-		return e.clientWrite(msg)
+		return io.clientWrite(msg)
 	}
 	resTrim := bytes.TrimSpace(probe.Result)
 
@@ -249,21 +249,21 @@ func (a *injAdapter) HandleUpstreamFrame(e *engine, msg []byte) error {
 		a.mu.Unlock()
 		if !ok {
 			// Unknown id — pass through.
-			return e.clientWrite(msg)
+			return io.clientWrite(msg)
 		}
 		// First-time subscribe: forward ack with the client's original id.
 		// Re-issue (resume): silently absorb.
 		if !sub.Cursor.IsZero() {
 			return nil
 		}
-		return e.clientReplyResult(sub.ClientJSONRPCID, "success")
+		return io.clientReplyResult(sub.ClientJSONRPCID, "success")
 	}
 
 	// Notification: result is an object with block_height.
 	notif, ok := ParseInjNotification(msg)
 	if !ok {
 		// Unknown frame shape — forward verbatim.
-		return e.clientWrite(msg)
+		return io.clientWrite(msg)
 	}
 	idStr := unquoteID(notif.ID)
 
@@ -302,14 +302,15 @@ func (a *injAdapter) HandleUpstreamFrame(e *engine, msg []byte) error {
 		sub.Cursor = notif.Cursor
 		a.mu.Unlock()
 	}
-	return e.clientWrite(rewritten)
+	return io.clientWrite(rewritten)
 }
 
 // ReplaySubs re-issues every active subscription on the freshly-dialed
 // upstream. The upstream replies "success" (which HandleUpstreamFrame
 // silently absorbs because Cursor is non-zero). Subsequent notifications
-// match via the fresh internal id bound below.
-func (a *injAdapter) ReplaySubs(ctx context.Context, e *engine) {
+// match via the fresh internal id bound below. Aborts on the first write
+// error and returns it.
+func (a *injAdapter) ReplaySubs(_ context.Context, io sessionIO) error {
 	a.mu.Lock()
 	subs := make([]*InjSub, 0, len(a.subs))
 	for _, sub := range a.subs {
@@ -323,6 +324,9 @@ func (a *injAdapter) ReplaySubs(ctx context.Context, e *engine) {
 		// Forget the previous upstream id; new id replaces it.
 		delete(a.byUpID, sub.UpstreamID)
 		sub.UpstreamID = internalID
+		// Stale pending entries from never-acked epochs are deliberately
+		// retained: they serve the late-notification fallback window, ids
+		// never collide, and the cost is memory-only, bounded by flap count.
 		a.pending[internalID] = sub
 		a.byUpID[internalID] = sub
 		a.mu.Unlock()
@@ -332,11 +336,11 @@ func (a *injAdapter) ReplaySubs(ctx context.Context, e *engine) {
 			"method":  "subscribe",
 			"params":  map[string]any{"subscription_id": sub.SubscriptionID, "filter": json.RawMessage(sub.Filter)},
 		})
-		if err := e.upstreamWrite(out); err != nil {
-			log.FromCtx(ctx).Warn("inj_ws: replay write failed", "err", err.Error())
-			return
+		if err := io.upstreamWrite(out); err != nil {
+			return err
 		}
 	}
+	return nil
 }
 
 // ResumableSubs reports the live sub count — every /injstream-ws sub is
@@ -350,20 +354,4 @@ func (a *injAdapter) ResumableSubs() int {
 
 func (a *injAdapter) nextID() string {
 	return fmt.Sprintf("stitch_inj_%d", a.idSeq.Add(1))
-}
-
-// unquoteID converts a JSON-RPC id (which may be a number, a quoted
-// string, or null) into a comparable string key. We treat "stitch_inj_1"
-// and stitch_inj_1 as the same id so the pending map keys can be plain
-// Go strings. Also used by the hub's ack matching.
-func unquoteID(id json.RawMessage) string {
-	s := strings.TrimSpace(string(id))
-	if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
-		var u string
-		if err := json.Unmarshal([]byte(s), &u); err == nil {
-			return u
-		}
-		return s[1 : len(s)-1]
-	}
-	return s
 }

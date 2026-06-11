@@ -47,25 +47,37 @@ type protocolAdapter interface {
 	ResumeReason() string
 
 	// HandleClientFrame consumes one client→upstream frame: intercept
-	// subscribe/unsubscribe, otherwise forward via e.upstreamWrite. A
+	// subscribe/unsubscribe, otherwise forward via io.upstreamWrite. A
 	// returned error terminates the session.
-	HandleClientFrame(e *engine, msg []byte) error
+	HandleClientFrame(io sessionIO, msg []byte) error
 
 	// HandleUpstreamFrame consumes one upstream→client frame: resolve
 	// pending subscribe acks, dedup + rewrite notifications against
 	// per-sub cursors, pass everything else through per protocol rules.
 	// A returned error tears down the upstream (resume rules apply).
-	HandleUpstreamFrame(e *engine, msg []byte) error
+	HandleUpstreamFrame(io sessionIO, msg []byte) error
 
 	// ReplaySubs re-issues every resumable subscription on a freshly
 	// dialed upstream. Called by the run loop before the upstream reader
-	// starts, so it never races HandleUpstreamFrame.
-	ReplaySubs(ctx context.Context, e *engine)
+	// starts, so it never races HandleUpstreamFrame. Replay aborts on the
+	// first write error and returns it; nil means every sub was re-issued.
+	ReplaySubs(ctx context.Context, io sessionIO) error
 
 	// ResumableSubs reports how many subscriptions a replay would
 	// re-issue. After upstream death the engine reconnects when > 0 and
 	// terminates the session otherwise.
 	ResumableSubs() int
+}
+
+// sessionIO is the only engine surface adapters may touch: serialized,
+// deadline-guarded writes and JSON-RPC reply helpers. Conns, locks,
+// channels, and goroutines are engine-private.
+type sessionIO interface {
+	upstreamWrite(msg []byte) error
+	clientWrite(msg []byte) error
+	clientReplyResult(id json.RawMessage, result string) error
+	clientReplyBool(id json.RawMessage, result bool) error
+	clientReplyError(id json.RawMessage, code int, msg string) error
 }
 
 // engine owns the protocol-independent mechanics of one client WebSocket
@@ -93,10 +105,13 @@ type engine struct {
 }
 
 // newEngine wires an engine to its client connection and adapter. A nil
-// dialer gets the default 5s-handshake dialer.
-func newEngine(client *websocket.Conn, sel selector.Selector, dialer *websocket.Dialer, adapter protocolAdapter) *engine {
+// dialer gets a default dialer using handshakeTimeout when > 0, else 5s.
+func newEngine(client *websocket.Conn, sel selector.Selector, dialer *websocket.Dialer, handshakeTimeout time.Duration, adapter protocolAdapter) *engine {
 	if dialer == nil {
-		dialer = &websocket.Dialer{HandshakeTimeout: 5 * time.Second}
+		if handshakeTimeout <= 0 {
+			handshakeTimeout = 5 * time.Second
+		}
+		dialer = &websocket.Dialer{HandshakeTimeout: handshakeTimeout}
 	}
 	_, tag := adapter.SessionLabels()
 	return &engine{
@@ -137,7 +152,14 @@ func (e *engine) run(ctx context.Context, readClient func(clientCh chan<- []byte
 
 		// On every (re)connect, replay resumable subscriptions before the
 		// upstream reader starts consuming acks.
-		e.adapter.ReplaySubs(ctx, e)
+		//
+		// TODO: treat replay write failure as upstream death (tearDownUpstream)
+		// instead of waiting for the reader to notice — a poisoned write side
+		// with a healthy read side leaves unreplayed subs stranded until the
+		// next upstream drop.
+		if err := e.adapter.ReplaySubs(ctx, e); err != nil {
+			log.FromCtx(ctx).Warn(e.tag+": replay failed; continuing with partial subscriptions", "err", err.Error())
+		}
 
 		upDone := make(chan error, 1)
 		go func() { upDone <- e.upstreamReader() }()
@@ -166,11 +188,12 @@ func (e *engine) run(ctx context.Context, readClient func(clientCh chan<- []byte
 				e.tearDownUpstream()
 				<-upDone
 				return err
-			case <-upDone:
+			case upErr := <-upDone:
 				resumable := e.adapter.ResumableSubs()
 				log.FromCtx(ctx).Info(e.tag+": upstream gone, evaluating resume",
 					"backend", e.upBackend.Load(),
 					"resumable_subs", resumable,
+					"err", errString(upErr),
 				)
 				if resumable == 0 {
 					return nil
@@ -330,4 +353,13 @@ func (e *engine) clientReplyError(id json.RawMessage, code int, msg string) erro
 func (e *engine) backendName() string {
 	v, _ := e.upBackend.Load().(string)
 	return v
+}
+
+// errString renders an error as a nil-safe log attribute (local replica of
+// the helper in health/probe_eth_ws.go; not worth an import).
+func errString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
