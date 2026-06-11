@@ -50,9 +50,9 @@ func NewHub(sel selector.Selector, dialer *websocket.Dialer) *Hub {
 		dialer = &websocket.Dialer{HandshakeTimeout: 5 * time.Second}
 	}
 	return &Hub{
-		selector:    sel,
-		dialer:      dialer,
-		upstreams:   make(map[string]*hubUpstream),
+		selector:     sel,
+		dialer:       dialer,
+		upstreams:    make(map[string]*hubUpstream),
 		SlowConsumer: "drop",
 		SendBufSize:  64,
 	}
@@ -155,19 +155,19 @@ func (s *Subscriber) DropCount() int64 { return s.dropCount.Load() }
 // hubUpstream owns one upstream WS connection that may be shared by N
 // subscribers.
 type hubUpstream struct {
-	hub      *Hub
-	key      string
-	filter   json.RawMessage
+	hub    *Hub
+	key    string
+	filter json.RawMessage
 
-	mu       sync.Mutex
-	cursor   int64
-	conn     *websocket.Conn
-	clients  []*Subscriber
-	pending  map[string]struct{} // outgoing subscribe ids awaiting ack
-	upstreamID string             // current id used in subscribe to upstream
-	detachCh chan struct{}
-	idSeq    atomic.Uint64
-	closed   bool
+	mu         sync.Mutex
+	cursor     int64
+	conn       *websocket.Conn
+	clients    []*Subscriber
+	pending    map[string]struct{} // outgoing subscribe ids awaiting ack
+	upstreamID string              // current id used in subscribe to upstream
+	detachCh   chan struct{}
+	idSeq      atomic.Uint64
+	closed     bool
 }
 
 func newHubUpstream(h *Hub, key string, filter json.RawMessage) *hubUpstream {

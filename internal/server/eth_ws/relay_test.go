@@ -70,9 +70,9 @@ func (m *mockWSUpstream) URL() string {
 func (m *mockWSUpstream) Close() { m.srv.Close() }
 
 type wsRig struct {
-	front   *Server
-	frontT  *httptest.Server
-	primary *mockWSUpstream // first selector pick
+	front    *Server
+	frontT   *httptest.Server
+	primary  *mockWSUpstream // first selector pick
 	fallback *mockWSUpstream
 }
 
@@ -239,11 +239,11 @@ func TestWSReturns503WhenNoBackend(t *testing.T) {
 
 func TestWSUpstreamURLNormalization(t *testing.T) {
 	cases := map[string]string{
-		"ws://x:8546":     "ws://x:8546",
-		"wss://x:8546":    "wss://x:8546",
-		"http://x:8546":   "ws://x:8546",
-		"https://x:8546":  "wss://x:8546",
-		"x:8546":          "x:8546",
+		"ws://x:8546":    "ws://x:8546",
+		"wss://x:8546":   "wss://x:8546",
+		"http://x:8546":  "ws://x:8546",
+		"https://x:8546": "wss://x:8546",
+		"x:8546":         "x:8546",
 	}
 	for in, want := range cases {
 		if got := upstreamURL(in); got != want {

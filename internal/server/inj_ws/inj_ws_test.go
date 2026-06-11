@@ -1,8 +1,10 @@
 package inj_ws
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -338,6 +340,52 @@ func TestInjWSRejectsSubscribeWithoutID(t *testing.T) {
 	readJSON(t, c, &resp)
 	if resp.Error.Code != -32602 {
 		t.Errorf("expected -32602 InvalidParams; got %d", resp.Error.Code)
+	}
+}
+
+// TestInjWSShutdownClosesLiveSessions: Shutdown must force-close live
+// (hijacked) WS sessions — http.Server.Shutdown alone would leave them
+// running until the client disconnects on its own.
+func TestInjWSShutdownClosesLiveSessions(t *testing.T) {
+	primary := newInjMock("primary", 1, 0) // acks subscribe, emits nothing
+	defer primary.Kill()
+	fallback := newInjMock("fallback", 1, 0)
+	defer fallback.Kill()
+	srv, front, cleanup := setupInjRig(t, primary, fallback)
+	defer cleanup()
+
+	c := dial(t, front.URL)
+	defer c.Close()
+	if err := c.WriteMessage(websocket.TextMessage, []byte(`{"jsonrpc":"2.0","id":9,"method":"subscribe","params":{"subscription_id":"shut","filter":{}}}`)); err != nil {
+		t.Fatal(err)
+	}
+	var ack struct {
+		Result string `json:"result"`
+	}
+	readJSON(t, c, &ack)
+	if ack.Result != "success" {
+		t.Fatalf("ack: %+v", ack)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	start := time.Now()
+	if err := srv.Shutdown(ctx); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 1500*time.Millisecond {
+		t.Errorf("Shutdown took %v; it must not wait for the client to leave", elapsed)
+	}
+
+	// The next read must fail with a close/EOF error, not a deadline
+	// timeout — a timeout would mean the conn was simply left open.
+	_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, _, err := c.ReadMessage()
+	if err == nil {
+		t.Fatal("expected close after shutdown, got a frame")
+	}
+	if e, ok := err.(net.Error); ok && e.Timeout() {
+		t.Errorf("conn still open after shutdown (read timed out)")
 	}
 }
 

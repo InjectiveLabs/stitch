@@ -36,10 +36,10 @@ type InjSession struct {
 	selector selector.Selector
 	dialer   *websocket.Dialer
 
-	mu        sync.Mutex
-	subs      map[string]*InjSub // subscription_id → sub
-	pending   map[string]*InjSub // our internal JSON-RPC id → sub awaiting upstream ack
-	idSeq     atomic.Uint64
+	mu      sync.Mutex
+	subs    map[string]*InjSub // subscription_id → sub
+	pending map[string]*InjSub // our internal JSON-RPC id → sub awaiting upstream ack
+	idSeq   atomic.Uint64
 
 	upstream  atomic.Pointer[websocket.Conn]
 	upBackend atomic.Value // string
@@ -47,6 +47,7 @@ type InjSession struct {
 	clientWriteMu   sync.Mutex
 	upstreamWriteMu sync.Mutex
 	closed          atomic.Bool
+	done            chan struct{} // closed when Run exits; releases clientReader sends
 }
 
 // InjSub captures one /injstream-ws subscription's full replay state.
@@ -78,6 +79,7 @@ func NewInjSession(client *websocket.Conn, cfg InjSessionConfig) *InjSession {
 		dialer:   d,
 		subs:     make(map[string]*InjSub),
 		pending:  make(map[string]*InjSub),
+		done:     make(chan struct{}),
 	}
 }
 
@@ -86,6 +88,7 @@ func (s *InjSession) Run(ctx context.Context) error {
 	defer s.closeClient(websocket.CloseGoingAway, "session ending")
 	defer metrics.SubscriptionsActive.WithLabelValues(string(types.ProtoChainStream), "inj_ws").Dec()
 	metrics.SubscriptionsActive.WithLabelValues(string(types.ProtoChainStream), "inj_ws").Inc()
+	defer close(s.done) // every return stops draining clientCh; release the reader
 
 	clientCh := make(chan []byte, 32)
 	clientErrCh := make(chan error, 1)
@@ -194,15 +197,23 @@ func (s *InjSession) tearDownUpstream() {
 	}
 }
 
+// clientReader pumps frames from the client into clientCh until close.
+// Sends race s.done: once Run returns nothing drains clientCh, and a conn
+// close only unblocks ReadMessage — a full buffer would otherwise strand
+// this goroutine on the send forever.
 func (s *InjSession) clientReader(_ context.Context, clientCh chan<- []byte, errCh chan<- error) {
 	defer close(clientCh)
 	for {
 		_, msg, err := s.client.ReadMessage()
 		if err != nil {
-			errCh <- err
+			errCh <- err // cap-1, single send ever — never blocks
 			return
 		}
-		clientCh <- msg
+		select {
+		case clientCh <- msg:
+		case <-s.done:
+			return
+		}
 	}
 }
 
@@ -363,6 +374,7 @@ func (s *InjSession) routeUpstreamFrame(_ context.Context, msg []byte) error {
 	}
 	s.mu.Unlock()
 	if sub == nil {
+		metrics.SubscriptionDroppedNotifs.WithLabelValues(string(types.ProtoChainStream), "unknown_sub").Inc()
 		return nil // drop unknown
 	}
 

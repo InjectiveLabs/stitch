@@ -30,19 +30,20 @@ type Session struct {
 	dialer   *websocket.Dialer
 
 	mu      sync.Mutex
-	subs    map[string]*Sub  // synthetic ID → sub
+	subs    map[string]*Sub   // synthetic ID → sub
 	upToSyn map[string]string // upstream-minted ID → synthetic ID
-	pending map[string]*Sub  // our outgoing JSON-RPC id → pending sub awaiting response
+	pending map[string]*Sub   // our outgoing JSON-RPC id → pending sub awaiting response
 	synSeq  uint64
 	idSeq   atomic.Uint64
 
 	upstream  atomic.Pointer[websocket.Conn]
 	upBackend atomic.Value // string
 
-	clientWriteMu sync.Mutex
+	clientWriteMu   sync.Mutex
 	upstreamWriteMu sync.Mutex
 
 	closed atomic.Bool
+	done   chan struct{} // closed when Run exits; releases clientReader sends
 }
 
 // Sub is one active subscription owned by a session.
@@ -58,8 +59,8 @@ type Sub struct {
 
 // SessionConfig configures a session at construction.
 type SessionConfig struct {
-	Selector       selector.Selector
-	Dialer         *websocket.Dialer
+	Selector         selector.Selector
+	Dialer           *websocket.Dialer
 	HandshakeTimeout time.Duration
 }
 
@@ -78,6 +79,7 @@ func NewSession(client *websocket.Conn, cfg SessionConfig) *Session {
 		subs:     make(map[string]*Sub),
 		upToSyn:  make(map[string]string),
 		pending:  make(map[string]*Sub),
+		done:     make(chan struct{}),
 	}
 }
 
@@ -86,6 +88,7 @@ func (s *Session) Run(ctx context.Context) error {
 	defer s.closeClient(websocket.CloseGoingAway, "session ending")
 	defer metrics.SubscriptionsActive.WithLabelValues(string(types.ProtoEthWS), "session").Dec()
 	metrics.SubscriptionsActive.WithLabelValues(string(types.ProtoEthWS), "session").Inc()
+	defer close(s.done) // every return stops draining clientCh; release the reader
 
 	clientCh := make(chan []byte, 32)
 	clientErrCh := make(chan error, 1)
@@ -200,15 +203,22 @@ func (s *Session) tearDownUpstream() {
 }
 
 // clientReader pumps frames from the client into clientCh until close.
+// Sends race s.done: once Run returns nothing drains clientCh, and a conn
+// close only unblocks ReadMessage — a full buffer would otherwise strand
+// this goroutine on the send forever.
 func (s *Session) clientReader(_ context.Context, clientCh chan<- []byte, errCh chan<- error) {
 	defer close(clientCh)
 	for {
 		_, msg, err := s.client.ReadMessage()
 		if err != nil {
-			errCh <- err
+			errCh <- err // cap-1, single send ever — never blocks
 			return
 		}
-		clientCh <- msg
+		select {
+		case clientCh <- msg:
+		case <-s.done:
+			return
+		}
 	}
 }
 
@@ -368,6 +378,7 @@ func (s *Session) handleUpstreamNotification(msg []byte) error {
 	}
 	s.mu.Unlock()
 	if !ok || sub == nil {
+		metrics.SubscriptionDroppedNotifs.WithLabelValues(string(types.ProtoEthWS), "unknown_sub").Inc()
 		return nil // unknown sub — drop
 	}
 

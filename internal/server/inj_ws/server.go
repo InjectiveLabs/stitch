@@ -24,6 +24,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -46,6 +47,13 @@ type Server struct {
 	upgrader websocket.Upgrader
 	dialer   *websocket.Dialer
 	srv      *http.Server
+
+	// Live-session accounting. http.Server.Shutdown neither waits for
+	// nor closes hijacked conns, so Shutdown sweeps these itself.
+	mu       sync.Mutex
+	draining bool
+	sessions map[*websocket.Conn]struct{}
+	handlers sync.WaitGroup
 }
 
 func New(addr string, sel selector.Selector) *Server {
@@ -62,6 +70,7 @@ func New(addr string, sel selector.Selector) *Server {
 			ReadBufferSize:   4096,
 			WriteBufferSize:  4096,
 		},
+		sessions: make(map[*websocket.Conn]struct{}),
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc(EndpointPath, s.serveWS)
@@ -84,7 +93,53 @@ func (s *Server) Start(_ context.Context) error {
 	return nil
 }
 
-func (s *Server) Shutdown(ctx context.Context) error { return s.srv.Shutdown(ctx) }
+// Shutdown stops the listener, then force-closes every live WS session
+// and waits — bounded by ctx — for their handlers to return. Closing the
+// client conn is enough: the session's reader errors out and the run
+// loop unwinds through its teardown paths, dropping the upstream dial.
+func (s *Server) Shutdown(ctx context.Context) error {
+	err := s.srv.Shutdown(ctx)
+
+	s.mu.Lock()
+	s.draining = true
+	for c := range s.sessions {
+		_ = c.Close()
+	}
+	s.mu.Unlock()
+
+	done := make(chan struct{})
+	go func() { s.handlers.Wait(); close(done) }()
+	select {
+	case <-done:
+		return err
+	case <-ctx.Done():
+		if err != nil {
+			return err
+		}
+		return ctx.Err()
+	}
+}
+
+// track registers a live session conn. Returns false once Shutdown has
+// begun — the caller must close the conn instead of serving it, because
+// the sweep may already have run.
+func (s *Server) track(c *websocket.Conn) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.draining {
+		return false
+	}
+	s.sessions[c] = struct{}{}
+	s.handlers.Add(1)
+	return true
+}
+
+func (s *Server) untrack(c *websocket.Conn) {
+	s.mu.Lock()
+	delete(s.sessions, c)
+	s.mu.Unlock()
+	s.handlers.Done()
+}
 
 // Handler exposes the underlying handler — used by tests.
 func (s *Server) Handler() http.Handler { return s.srv.Handler }
@@ -111,6 +166,11 @@ func (s *Server) serveWS(w http.ResponseWriter, r *http.Request) {
 		log.FromCtx(ctx).Warn("inj_ws: upgrade failed", "err", err.Error())
 		return
 	}
+	if !s.track(clientConn) {
+		_ = clientConn.Close()
+		return
+	}
+	defer s.untrack(clientConn)
 
 	sess := subscription.NewInjSession(clientConn, subscription.InjSessionConfig{
 		Selector: s.selector,

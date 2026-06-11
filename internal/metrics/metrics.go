@@ -104,6 +104,14 @@ var (
 		},
 		[]string{"protocol"},
 	)
+	SubscriptionDroppedNotifs = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: Namespace,
+			Name:      "subscription_dropped_notifications_total",
+			Help:      "Upstream notifications dropped instead of forwarded, by protocol and reason.",
+		},
+		[]string{"protocol", "reason"},
+	)
 	InflightRequests = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Namespace: Namespace,
@@ -162,6 +170,7 @@ func init() {
 		SubscriptionsActive,
 		SubscriptionResumes,
 		SubscriptionGaps,
+		SubscriptionDroppedNotifs,
 		InflightRequests,
 		BroadcastFanout,
 		HedgeWins,
