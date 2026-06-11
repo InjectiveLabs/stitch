@@ -127,7 +127,7 @@ curl -s http://127.0.0.1:9091/metrics | grep stitch_
 
 ### From source
 
-Requires Go 1.21+.
+Requires Go 1.25+.
 
 ```bash
 git clone https://github.com/decentrio/stitch

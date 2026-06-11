@@ -7,6 +7,24 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Fixed
+
+- Graceful shutdown returns as soon as every listener has drained instead of
+  always blocking for the full `--shutdown-grace` window; per-server drain
+  timings are logged, and servers still draining at the deadline are named.
+- A listener failing to start (e.g. a port conflict) now drains its peers
+  instead of leaving them running with signal handling disabled — previously
+  the process could only be stopped with SIGKILL.
+
+### Changed
+
+- Bounded-coverage backends are verified once at startup (with retry) instead
+  of being probed every `probe_interval`; their coverage is static, so
+  periodic `/status` polls were wasted work.
+- CI runs on pushes to `master` (the actual default branch) and tests
+  Go 1.25 + stable, matching the `go.mod` directive. README now states the
+  real minimum (Go 1.25+).
+
 ## [0.1.0] — initial release
 
 First public cut. Stitch fronts an arbitrary number of upstream Cosmos /
