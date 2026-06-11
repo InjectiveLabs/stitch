@@ -1,6 +1,7 @@
 package forwarder
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -73,6 +74,8 @@ func (f *HTTP) Hedge(w http.ResponseWriter, r *http.Request, key types.RouteKey)
 		break
 	}
 	if primary == nil {
+		r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+		r.ContentLength = int64(len(bodyBytes))
 		f.Forward(w, r, key)
 		return
 	}

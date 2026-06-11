@@ -148,6 +148,10 @@ func (b *Breaker) Acquire() bool {
 // the breaker is not half-open or the slot is unclaimed. For requests
 // whose outcome says nothing about the backend — e.g. the client vanished
 // mid-flight, or a hedge/broadcast loser cancelled after a winner.
+//
+// Release may free a slot claimed by a different in-flight canary when
+// admissions interleave across a trip/re-probe cycle — the same
+// stale-evidence tolerance Record already has.
 func (b *Breaker) Release() {
 	if State(b.state.Load()) == StateClosed {
 		return

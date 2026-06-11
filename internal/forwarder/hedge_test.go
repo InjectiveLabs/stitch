@@ -2,8 +2,11 @@ package forwarder
 
 import (
 	"context"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -200,9 +203,40 @@ func TestHedgeTrippedPrimaryServesViaFallback(t *testing.T) {
 	}
 }
 
+// errorOnReadBody is a ReadCloser that returns an error on any Read after
+// Close, mimicking net/http's real incoming request body (unlike io.NopCloser,
+// which silently ignores Close and lets reads drain to empty).
+type errorOnReadBody struct {
+	r      io.Reader
+	closed bool
+}
+
+func (b *errorOnReadBody) Read(p []byte) (int, error) {
+	if b.closed {
+		return 0, fmt.Errorf("invalid Read on closed Body")
+	}
+	return b.r.Read(p)
+}
+
+func (b *errorOnReadBody) Close() error {
+	b.closed = true
+	return nil
+}
+
 // With every candidate unacquirable, Hedge delegates to Forward's skip and
-// exhaustion semantics instead of firing blind.
+// exhaustion semantics instead of firing blind. The request body must
+// survive the delegation: a POST with a non-empty body must be readable by
+// Forward after Hedge has consumed it (regression for the bug where the
+// no-acquirable-primary path handed Forward a closed r.Body).
+//
+// errorOnReadBody simulates net/http's real body behavior: Read after Close
+// returns an error. Without fix 1, Forward's body-read returns
+// "invalid Read on closed Body" which propagates as a 400. With fix 1,
+// r.Body is restored before the delegation so Forward can read it cleanly
+// and returns 502 (all breakers open, no upstream reachable).
 func TestHedgeAllTrippedDelegatesToForward(t *testing.T) {
+	const wantBody = `{"jsonrpc":"2.0","method":"eth_call","id":1}`
+
 	var hits atomic.Int32
 	mk := func() *httptest.Server {
 		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -234,7 +268,15 @@ func TestHedgeAllTrippedDelegatesToForward(t *testing.T) {
 	})
 
 	rec := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/eth_call", nil)
+	// Use errorOnReadBody so that a Read after Close returns an error,
+	// matching net/http's real body behavior. Without the body restore in
+	// Hedge, Forward's io.ReadAll(r.Body) returns "invalid Read on closed
+	// Body" which writeJSONError turns into a 400 response.
+	r := httptest.NewRequest(http.MethodPost, "/eth_call", nil)
+	r.Body = &errorOnReadBody{r: strings.NewReader(wantBody)}
+	r.ContentLength = int64(len(wantBody))
+	r.Header.Set("Content-Type", "application/json")
+
 	fwd.Hedge(rec, r, types.RouteKey{
 		Protocol:   types.ProtoRPC,
 		Method:     "eth_call",
@@ -243,8 +285,15 @@ func TestHedgeAllTrippedDelegatesToForward(t *testing.T) {
 		Hedge:      true,
 	})
 
+	// All breakers are open so neither Hedge nor Forward reaches an upstream.
 	if rec.Code != http.StatusBadGateway {
-		t.Errorf("expected 502 with every breaker open; got %d", rec.Code)
+		t.Errorf("expected 502 with every breaker open; got %d body=%s", rec.Code, rec.Body.String())
+	}
+	// Regression assertion: without fix 1 Forward receives a closed body and
+	// returns 400 with "invalid Read on closed Body". With fix 1 the body is
+	// restored and Forward returns 502 normally.
+	if body := rec.Body.String(); strings.Contains(body, "invalid Read on closed Body") {
+		t.Errorf("body not restored before Forward delegation — got spurious body-read error: %s", body)
 	}
 	if hits.Load() != 0 {
 		t.Errorf("no backend may be dispatched past an open breaker; hits=%d", hits.Load())
