@@ -139,6 +139,11 @@ func validatePolicies(p PoliciesConfig) error {
 	if p.Subscriptions.SendBuffer < 0 {
 		return errors.New("policies.subscriptions.send_buffer must be ≥ 1")
 	}
+	// nil = absent (defaulted to 30s before validation runs); an explicit
+	// 0 is valid and means a single dial pass per resume.
+	if p.Subscriptions.ReplayTimeout != nil && *p.Subscriptions.ReplayTimeout < 0 {
+		return errors.New("policies.subscriptions.replay_timeout must be ≥ 0; 0 = single dial pass per resume")
+	}
 	if p.Cache.Enabled && p.Cache.TTL <= 0 {
 		return errors.New("policies.cache.ttl must be > 0 when cache is enabled")
 	}

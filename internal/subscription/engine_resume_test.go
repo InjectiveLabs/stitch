@@ -179,11 +179,13 @@ func TestEngineZeroReplayTimeoutSinglePass(t *testing.T) {
 // 1 is the proof — a deadline-killed conn resumes onto a second conn.
 func TestEngineQuietUpstreamKeepalive(t *testing.T) {
 	mock := newGatedInjMock(t, 9, 1)
-	mock.emitDelay.Store(int64(900 * time.Millisecond)) // ~3× the read deadline below
+	mock.emitDelay.Store(int64(1500 * time.Millisecond)) // ~3× the read deadline below
 	sel := newChainStreamSelector(t, mock.HostPort())
+	// 500ms deadline / 100ms ping: the wide margin keeps a slow CI's
+	// scheduling hiccups from eating the whole pong window.
 	tune := connTuning{
 		dialTimeout:   2 * time.Second,
-		readDeadline:  300 * time.Millisecond,
+		readDeadline:  500 * time.Millisecond,
 		pingInterval:  100 * time.Millisecond,
 		pingWriteWait: time.Second,
 	}

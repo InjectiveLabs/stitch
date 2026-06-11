@@ -108,7 +108,7 @@ var (
 		prometheus.CounterOpts{
 			Namespace: Namespace,
 			Name:      "subscription_dropped_notifications_total",
-			Help:      "Upstream notifications dropped because they matched no live subscription, by protocol and reason.",
+			Help:      "Upstream subscription frames dropped before reaching clients, by protocol and reason (unknown_sub: matched no live subscription; slow_consumer: fan-out policy eviction; upstream_reject: upstream answered the shared subscribe with a JSON-RPC error).",
 		},
 		[]string{"protocol", "reason"},
 	)

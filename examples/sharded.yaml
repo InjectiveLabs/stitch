@@ -54,7 +54,9 @@ policies:
                                        # appear ~probe_interval × block_rate blocks behind.
                                        # Set this comfortably above that gap, or omit it.
   subscriptions:
-    multicast: true
+    # opt-in: N clients with the same filter share one upstream; non-subscribe
+    # frames are rejected in this mode — see README
+    multicast: false
     slow_consumer: drop
 
 backends:

@@ -195,7 +195,6 @@ type Subscriber struct {
 	done      chan struct{}
 	hub       *Hub
 	upstream  *hubUpstream
-	cursor    int64
 	dropCount atomic.Int64
 }
 
@@ -234,10 +233,13 @@ type hubUpstream struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	mu         sync.Mutex
-	cursor     int64
-	conn       *websocket.Conn
-	clients    []*Subscriber
+	mu      sync.Mutex
+	cursor  int64
+	conn    *websocket.Conn
+	clients []*Subscriber
+	// pending is drained on ack AND on error-reject; the remaining leak
+	// case — epochs that are never answered at all — is bounded by the
+	// resume count and left alone deliberately.
 	pending    map[string]struct{} // outgoing subscribe ids awaiting ack
 	upstreamID string              // current id used in subscribe to upstream
 	idSeq      atomic.Uint64
@@ -259,6 +261,10 @@ func newHubUpstream(h *Hub, key string, filter json.RawMessage) *hubUpstream {
 // attach adds a subscriber. It refuses — returns false — once the
 // upstream is closing or cancelled, so Subscribe replaces the entry
 // instead of binding a client to a goroutine that is about to exit.
+// One sliver remains: a run loop exiting via dial-failure sets closed
+// only in its defer (ctx not yet cancelled), so an attach can land on it
+// — that client gets its ack and then the prompt 1013 close when
+// failAllClients detaches it; safe, bounded, deliberate.
 func (u *hubUpstream) attach(s *Subscriber) bool {
 	u.mu.Lock()
 	defer u.mu.Unlock()
@@ -412,6 +418,7 @@ func (u *hubUpstream) runUntilFailure() error {
 			}
 			return err
 		}
+		_ = conn.SetReadDeadline(time.Now().Add(u.hub.tuning.readDeadline)) // liveness = data OR pong (see connTuning)
 		u.handleFrame(msg)
 	}
 }
@@ -444,8 +451,31 @@ func (u *hubUpstream) handleFrame(msg []byte) {
 	var probe struct {
 		ID     json.RawMessage `json:"id"`
 		Result json.RawMessage `json:"result"`
+		Error  json.RawMessage `json:"error"`
 	}
 	if err := json.Unmarshal(msg, &probe); err != nil {
+		return
+	}
+	// Upstream rejected the hub's own subscribe: an error-shaped response
+	// whose id matches a pending entry. Drain pending, count it, and END
+	// the upstream — cancelling u.ctx makes run exit, whose defer detaches
+	// every subscriber, so client pumps see Done-while-owned and close
+	// their sessions with 1013 promptly instead of leaving clients parked
+	// forever on a dead subscription that acked "success" at attach time.
+	// Deliberately NOT a resume/replay: replaying the same rejected filter
+	// would be rejected again, forever.
+	if errBody := bytes.TrimSpace(probe.Error); len(errBody) > 0 && !bytes.Equal(errBody, []byte("null")) {
+		idStr := unquoteID(probe.ID)
+		u.mu.Lock()
+		_, wasPending := u.pending[idStr]
+		delete(u.pending, idStr)
+		u.mu.Unlock()
+		if wasPending {
+			log.L().Warn("hub: upstream rejected subscribe; ending shared upstream",
+				"key", u.key, "error", string(errBody))
+			metrics.SubscriptionDroppedNotifs.WithLabelValues(string(types.ProtoChainStream), "upstream_reject").Inc()
+			u.cancel()
+		}
 		return
 	}
 	res := bytes.TrimSpace(probe.Result)

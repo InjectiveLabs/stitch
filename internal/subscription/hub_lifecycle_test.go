@@ -33,11 +33,12 @@ type gatedInjMock struct {
 	srv      *httptest.Server
 	upgrader websocket.Upgrader
 
-	accept    atomic.Bool
-	conns     atomic.Int64
-	emitFrom  atomic.Int64
-	emitN     atomic.Int64
-	emitDelay atomic.Int64 // nanoseconds between subscribe ack and first emit
+	accept          atomic.Bool
+	rejectSubscribe atomic.Bool // answer subscribe with a JSON-RPC error instead of the ack
+	conns           atomic.Int64
+	emitFrom        atomic.Int64
+	emitN           atomic.Int64
+	emitDelay       atomic.Int64 // nanoseconds between subscribe ack and first emit
 
 	mu      sync.Mutex
 	wsConns []*websocket.Conn
@@ -115,6 +116,15 @@ func (m *gatedInjMock) handle(w http.ResponseWriter, r *http.Request) {
 			}
 			_ = json.Unmarshal(msg, &probe)
 			if probe.Method == "subscribe" {
+				if m.rejectSubscribe.Load() {
+					reject, _ := json.Marshal(map[string]any{
+						"jsonrpc": "2.0",
+						"id":      json.RawMessage(probe.ID),
+						"error":   map[string]any{"code": -32602, "message": "filter rejected"},
+					})
+					_ = writeFrame(reject)
+					continue
+				}
 				ack, _ := json.Marshal(map[string]any{
 					"jsonrpc": "2.0",
 					"id":      json.RawMessage(probe.ID),
@@ -342,11 +352,13 @@ func TestHubSlowConsumerDisconnectDetachesAndCounts(t *testing.T) {
 // kills the conn and the resume re-dial bumps it to 2.
 func TestHubQuietUpstreamKeepalive(t *testing.T) {
 	mock := newGatedInjMock(t, 7, 1)
-	mock.emitDelay.Store(int64(900 * time.Millisecond)) // ~3× the read deadline below
+	mock.emitDelay.Store(int64(1500 * time.Millisecond)) // ~3× the read deadline below
 	hub := newGatedHub(t, mock)
+	// 500ms deadline / 100ms ping: the wide margin keeps a slow CI's
+	// scheduling hiccups from eating the whole pong window.
 	hub.tuning = connTuning{
 		dialTimeout:   2 * time.Second,
-		readDeadline:  300 * time.Millisecond,
+		readDeadline:  500 * time.Millisecond,
 		pingInterval:  100 * time.Millisecond,
 		pingWriteWait: time.Second,
 	}
@@ -401,6 +413,57 @@ func TestHubResumeRedialWithinWindow(t *testing.T) {
 	}
 	if got := mock.conns.Load(); got != 2 {
 		t.Errorf("upstream conns = %d; want 2 (one resume)", got)
+	}
+}
+
+// TestHubUpstreamSubscribeRejectEndsUpstream: an upstream that answers
+// the hub's subscribe with a JSON-RPC error must END the shared upstream
+// rather than leave a silently dead subscription behind the synthesized
+// attach-time acks — every attached subscriber's Done fires (so sessions
+// close their clients with 1013), the reject is counted under
+// SubscriptionDroppedNotifs{upstream_reject}, the upstream leaves the hub,
+// and its run goroutine exits. It must NOT resume: replaying the same
+// rejected filter would be rejected again, forever.
+func TestHubUpstreamSubscribeRejectEndsUpstream(t *testing.T) {
+	mock := newGatedInjMock(t, 1, 0)
+	mock.rejectSubscribe.Store(true)
+	hub := newGatedHub(t, mock)
+	hub.ReplayTimeout = 5 * time.Second // must NOT be consumed: reject ≠ resume
+
+	lbl := metrics.SubscriptionDroppedNotifs.WithLabelValues(string(types.ProtoChainStream), "upstream_reject")
+	before := testutil.ToFloat64(lbl)
+
+	a, err := hub.Subscribe(context.Background(), json.RawMessage(`{"rej":1}`), "ca", json.RawMessage(`1`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := hub.Subscribe(context.Background(), json.RawMessage(`{"rej":1}`), "cb", json.RawMessage(`2`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for name, sub := range map[string]*Subscriber{"a": a, "b": b} {
+		select {
+		case <-sub.Done():
+		case <-time.After(3 * time.Second):
+			t.Fatalf("subscriber %s not detached after upstream subscribe reject", name)
+		}
+	}
+	if got := testutil.ToFloat64(lbl) - before; got < 1 {
+		t.Errorf("upstream_reject metric delta = %v; want ≥ 1", got)
+	}
+	pollUntil(t, 2*time.Second, "upstream removed from hub", func() bool {
+		return hub.UpstreamCount() == 0
+	})
+	pollUntil(t, 2*time.Second, "hub upstream run goroutine exit", func() bool {
+		return !goroutineExists("hubUpstream).run")
+	})
+	// No resume: a redial would land within resumeBackoffMin (250ms); give
+	// it room and require the conn count to stay put.
+	conns := mock.conns.Load()
+	time.Sleep(400 * time.Millisecond)
+	if got := mock.conns.Load(); got != conns {
+		t.Errorf("upstream conns grew %d → %d after reject; a rejected subscribe must not be replayed", conns, got)
 	}
 }
 

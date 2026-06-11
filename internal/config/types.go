@@ -118,13 +118,16 @@ type HealthPolicy struct {
 // SendBuffer apply to the multicast fan-out: the policy when a client's
 // send buffer fills, and that buffer's capacity (default 64).
 // ReplayTimeout is the max time to wait for a dialable upstream during a
-// subscription resume before dropping the subscriber/session; 0 disables
-// the retry window (a resume gets a single dial pass).
+// subscription resume before dropping the subscriber/session. It is a
+// pointer because an explicit 0 is meaningful — it disables the retry
+// window (a resume gets a single dial pass) — and a plain duration's YAML
+// zero value would be indistinguishable from "absent": nil (key absent)
+// is defaulted to 30s by applyDefaults; an explicit 0s survives.
 type SubscriptionsPolicy struct {
-	Multicast     bool          `yaml:"multicast"`
-	SlowConsumer  string        `yaml:"slow_consumer"` // drop | disconnect | backpressure
-	SendBuffer    int           `yaml:"send_buffer,omitempty"`
-	ReplayTimeout time.Duration `yaml:"replay_timeout"`
+	Multicast     bool           `yaml:"multicast"`
+	SlowConsumer  string         `yaml:"slow_consumer"` // drop | disconnect | backpressure
+	SendBuffer    int            `yaml:"send_buffer,omitempty"`
+	ReplayTimeout *time.Duration `yaml:"replay_timeout"`
 }
 
 // BackendConfig declares one upstream node.

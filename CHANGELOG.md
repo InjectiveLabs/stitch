@@ -18,7 +18,11 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   cursor dedup. **In multicast mode, non-`subscribe`/`unsubscribe` JSON-RPC
   frames on `/injstream-ws` are rejected with a `-32601` error instead of
   per-session passthrough** (there is no per-client upstream to forward
-  them to).
+  them to). Subscribe acks are synthesized at attach time; if the upstream
+  rejects the shared subscribe (JSON-RPC error), the hub tears that
+  upstream down and the attached clients are closed with WS 1013 — the
+  rejected filter is never replayed — counted in
+  `stitch_subscription_dropped_notifications_total{reason="upstream_reject"}`.
 - The rest of `policies.subscriptions` is now real (previously parsed but
   consumed by nothing): `slow_consumer` governs the multicast fan-out
   policy per client (`drop` | `disconnect` | `backpressure`; drops are
@@ -26,8 +30,9 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   "slow_consumer"}`), the new `send_buffer` knob sizes the per-client
   fan-out queue (default 64), and `replay_timeout` is the max time a
   resume keeps re-dialing for an upstream (250ms→2s backoff between
-  passes) before the session/subscriber is dropped — 0 restores the
-  previous single-pass behavior.
+  passes) before the session/subscriber is dropped — omitted it defaults
+  to 30s, while an explicit `0` keeps the previous single-pass behavior
+  (one dial pass per resume); negative values are rejected at load.
 - `policies.cache.ttl`, `policies.cache.hash_index_entries`, and
   `policies.cache.response_entries` are now wired: they size the hash→height
   index and the response cache and set the response-entry lifetime

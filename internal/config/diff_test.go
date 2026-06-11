@@ -19,7 +19,7 @@ func diffFixture() *Config {
 			Circuit:          CircuitPolicy{ErrorThreshold: 0.5, MinRequests: 20, OpenDuration: 30 * time.Second},
 			Cache:            CachePolicy{Enabled: true, ConfirmationDepth: 100, TTL: 5 * time.Minute, HashIndexEntries: 100_000, ResponseEntries: 50_000},
 			Health:           HealthPolicy{ProbeInterval: 5 * time.Second, MaxLagBlocks: 50},
-			Subscriptions:    SubscriptionsPolicy{Multicast: true, SlowConsumer: "drop", ReplayTimeout: 30 * time.Second},
+			Subscriptions:    SubscriptionsPolicy{Multicast: true, SlowConsumer: "drop", ReplayTimeout: durPtr(30 * time.Second)},
 			DangerousMethods: DangerousMethodsPolicy{Allow: []string{"debug_traceCall"}},
 		},
 		Backends: []BackendConfig{{

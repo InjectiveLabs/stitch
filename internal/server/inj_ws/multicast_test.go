@@ -175,7 +175,7 @@ func setupMulticastRig(t *testing.T, opts SubscriptionOptions, mocks ...*mcMock)
 // killing that upstream resumes onto the fallback and nobody sees a
 // duplicate or a gap.
 func TestInjWSMulticastE2EResumeNoDuplicates(t *testing.T) {
-	primary := newMCMock(t, 1, 3, 300*time.Millisecond)  // emits 1,2,3 after all clients attach
+	primary := newMCMock(t, 1, 3, time.Second)           // emits 1,2,3 after all clients attach (window sized for 2-4x slower CI)
 	fallback := newMCMock(t, 3, 3, 200*time.Millisecond) // emits 3,4,5 — 3 deduped by the shared cursor
 	srv, front := setupMulticastRig(t, SubscriptionOptions{ReplayTimeout: 5 * time.Second}, primary, fallback)
 

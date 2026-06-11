@@ -139,7 +139,9 @@ func startCmd() *cobra.Command {
 			if cfg.Listen.EthWS.Enabled() {
 				ethWS := eth_ws.New(cfg.Listen.EthWS.Addr, selCore)
 				ethWS.SetSubscriptions(eth_ws.SubscriptionOptions{
-					ReplayTimeout: cfg.Policies.Subscriptions.ReplayTimeout,
+					// Non-nil after config.Load's applyDefaults; an explicit
+					// 0 means a single dial pass per resume.
+					ReplayTimeout: *cfg.Policies.Subscriptions.ReplayTimeout,
 				})
 				mgr.Add(ethWS)
 			}
@@ -153,10 +155,12 @@ func startCmd() *cobra.Command {
 			if cfg.Listen.InjWS.Enabled() {
 				injWS := inj_ws.New(cfg.Listen.InjWS.Addr, selCore)
 				injWS.SetSubscriptions(inj_ws.SubscriptionOptions{
-					Multicast:     cfg.Policies.Subscriptions.Multicast,
-					SlowConsumer:  cfg.Policies.Subscriptions.SlowConsumer,
-					SendBuffer:    cfg.Policies.Subscriptions.SendBuffer,
-					ReplayTimeout: cfg.Policies.Subscriptions.ReplayTimeout,
+					Multicast:    cfg.Policies.Subscriptions.Multicast,
+					SlowConsumer: cfg.Policies.Subscriptions.SlowConsumer,
+					SendBuffer:   cfg.Policies.Subscriptions.SendBuffer,
+					// Non-nil after config.Load's applyDefaults; an explicit
+					// 0 means a single dial pass per resume.
+					ReplayTimeout: *cfg.Policies.Subscriptions.ReplayTimeout,
 				})
 				mgr.Add(injWS)
 			}

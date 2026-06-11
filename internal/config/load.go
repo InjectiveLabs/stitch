@@ -101,8 +101,12 @@ func applyDefaults(c *Config) {
 	if c.Policies.Subscriptions.SendBuffer == 0 {
 		c.Policies.Subscriptions.SendBuffer = 64
 	}
-	if c.Policies.Subscriptions.ReplayTimeout == 0 {
-		c.Policies.Subscriptions.ReplayTimeout = 30 * time.Second
+	// nil = key absent. An explicit `replay_timeout: 0s` is kept as-is —
+	// it means "single dial pass per resume" — which is why the field is a
+	// pointer: a plain duration's yaml zero would be coerced to 30s here.
+	if c.Policies.Subscriptions.ReplayTimeout == nil {
+		d := 30 * time.Second
+		c.Policies.Subscriptions.ReplayTimeout = &d
 	}
 	for i := range c.Backends {
 		if c.Backends[i].Weight == 0 {

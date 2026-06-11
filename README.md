@@ -262,10 +262,13 @@ policies:
                                        # canonical filter share 1 upstream (default false)
     slow_consumer: drop                # multicast fan-out policy when a client's send
                                        # buffer fills: drop | disconnect | backpressure
+                                       # (backpressure stalls EVERY client subscribed to
+                                       # that filter — the upstream conn is shared)
     send_buffer: 64                    # per-client fan-out buffer, events (≥ 1; default 64)
     replay_timeout: 30s                # max time to wait for a dialable upstream during
                                        # resume before dropping the subscriber/session
-                                       # (0 = a single dial pass per resume)
+                                       # (omit → 30s; an explicit 0 = a single dial pass
+                                       # per resume)
   dangerous_methods:
     allow:                             # opt-in for debug_*/personal_*/miner_*
       - debug_traceCall
@@ -329,6 +332,15 @@ to N clients. A slow client is handled per
 `policies.subscriptions.slow_consumer` over its `send_buffer`-sized
 queue, and on upstream death the shared subscription resumes within
 `replay_timeout` with cursor dedup — no client sees a duplicate.
+
+Subscribe acks are synthesized at attach time: the hub replies
+`"success"` immediately and absorbs the upstream's own ack. A filter the
+upstream later **rejects** therefore still acks "success" — the client
+is then signaled by a WS close (1013, try again later) once the hub
+tears the shared upstream down (a rejected filter is never replayed; it
+would be rejected again forever). Operators: a "success" ack does not
+prove upstream acceptance — watch
+`stitch_subscription_dropped_notifications_total{reason="upstream_reject"}`.
 
 In multicast mode `/injstream-ws` serves **only** `subscribe` /
 `unsubscribe`; any other JSON-RPC frame is answered with a `-32601`

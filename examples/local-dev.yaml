@@ -26,7 +26,9 @@ policies:
   cache:
     enabled: false             # no need locally
   subscriptions:
-    multicast: true
+    # opt-in: N clients with the same filter share one upstream; non-subscribe
+    # frames are rejected in this mode — see README
+    multicast: false
     slow_consumer: drop
 
 backends:

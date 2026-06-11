@@ -14,9 +14,14 @@ import (
 // connTuning groups the upstream-connection timing knobs shared by engine
 // sessions and hub upstreams. Production code always runs the defaults;
 // package tests tighten them to keep wall time low.
+//
+// Liveness contract: readDeadline is refreshed by every pong AND by every
+// successful read (engine upstreamReader, hub runUntilFailure — mirroring
+// health/probe_eth_ws.go's per-frame refresh), so a peer that streams data
+// but never answers pings is not churned at the read deadline.
 type connTuning struct {
 	dialTimeout   time.Duration // per-candidate WS dial budget
-	readDeadline  time.Duration // max upstream quiet time; refreshed by pongs
+	readDeadline  time.Duration // max upstream quiet time; refreshed by pongs and data
 	pingInterval  time.Duration // upstream keepalive ping cadence
 	pingWriteWait time.Duration // write budget per ping control frame
 }

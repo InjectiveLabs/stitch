@@ -275,6 +275,7 @@ func (e *engine) upstreamReader() error {
 		if err != nil {
 			return err
 		}
+		_ = conn.SetReadDeadline(time.Now().Add(e.tuning.readDeadline)) // liveness = data OR pong (see connTuning)
 		if err := e.adapter.HandleUpstreamFrame(e, msg); err != nil {
 			return err
 		}
@@ -300,6 +301,9 @@ func (e *engine) dialUpstream(ctx context.Context) bool {
 // one succeeds or deadline passes. Aborts early when ctx is cancelled or
 // the client connection is gone: retrying a resume nobody is listening to
 // would pin the handler (and graceful shutdown) for the whole window.
+// clientGone can starve here: a client that filled clientCh and then
+// vanished parks the reader on its send (nothing drains during a resume),
+// so the close may never fire — the wait stays bounded by deadline and ctx.
 func (e *engine) redialUntil(ctx context.Context, deadline time.Time) bool {
 	backoff := resumeBackoffMin
 	for {
