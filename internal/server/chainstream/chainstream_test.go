@@ -38,7 +38,7 @@ type mockChainStream struct {
 	conns    atomic.Int64
 	sentN    atomic.Int64
 
-	mu      sync.Mutex
+	mu        sync.Mutex
 	wsStreams []grpc.ServerStream // opened streams; killed on Kill()
 }
 
@@ -346,6 +346,187 @@ func TestChainStreamReturnsCleanEOF(t *testing.T) {
 		}
 	case <-ctx.Done():
 		// Timed out — fine; nothing got through, dedup worked.
+	}
+}
+
+// failingChainStream accepts every stream, records the attempt time, and
+// fails the RPC immediately — a permanently broken upstream for backoff
+// measurements.
+type failingChainStream struct {
+	srv *grpc.Server
+	lis net.Listener
+
+	mu       sync.Mutex
+	attempts []time.Time
+}
+
+func newFailingChainStream(t *testing.T) *failingChainStream {
+	t.Helper()
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := &failingChainStream{lis: lis}
+	m.srv = grpc.NewServer(
+		grpc.ForceServerCodec(rawCodec{}),
+		grpc.UnknownServiceHandler(func(_ any, ss grpc.ServerStream) error {
+			m.mu.Lock()
+			m.attempts = append(m.attempts, time.Now())
+			m.mu.Unlock()
+			var req RawMessage
+			_ = ss.RecvMsg(&req)
+			return status.Error(codes.Unavailable, "synthetic upstream failure")
+		}),
+	)
+	go func() { _ = m.srv.Serve(lis) }()
+	return m
+}
+
+func (m *failingChainStream) Addr() string { return m.lis.Addr().String() }
+
+func (m *failingChainStream) Kill() {
+	m.srv.Stop()
+	_ = m.lis.Close()
+}
+
+func (m *failingChainStream) times() []time.Time {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]time.Time(nil), m.attempts...)
+}
+
+// A permanently failing upstream must see jittered-exponentially
+// increasing gaps between resume attempts — not 8 back-to-back redials.
+// The gap minima derive from the schedule's jitter floor (every sleep is
+// at least 0.8× its nominal value, and the doubling compounds the
+// jittered previous delay), so the test cannot flake on slow machines:
+// scheduling can only lengthen a gap, never shorten it.
+func TestChainStreamResumeBackoffIncreasingGaps(t *testing.T) {
+	up := newFailingChainStream(t)
+	defer up.Kill()
+
+	bs := []*backend.Backend{{
+		Name:      "flappy",
+		Coverage:  backend.Coverage{Kind: backend.CovArchive},
+		Weight:    100,
+		Endpoints: map[types.Protocol]string{types.ProtoChainStream: up.Addr()},
+	}}
+	reg := backend.NewRegistry(bs)
+	h := healthreg.NewRegistry()
+	h.Update(healthreg.Snapshot{Backend: "flappy", Protocol: types.ProtoRPC, Healthy: true, LatestHeight: 100000})
+	h.Update(healthreg.Snapshot{Backend: "flappy", Protocol: types.ProtoChainStream, Healthy: true})
+	// MinRequests is high so the breaker never trips: all 8 attempts land
+	// on the same backend and the gaps measure only the backoff.
+	cm := circuit.NewManager(circuit.Policy{ErrorThreshold: 0.5, MinRequests: 100, OpenDuration: time.Second})
+	gp := pool.NewGRPCPool(time.Minute)
+	srv, err := New("127.0.0.1:0", selector.NewRangeSelector(reg, h, cm, 0), cm, gp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Tighten the backoff so the 8 attempts complete in under a second.
+	srv.dir.baseBackoff = 25 * time.Millisecond
+	srv.dir.maxBackoff = 120 * time.Millisecond
+	go func() { _ = srv.Start(context.Background()) }()
+	defer func() {
+		_ = srv.Shutdown(context.Background())
+		gp.CloseAll()
+	}()
+
+	conn, cs := dialClient(t, srv.Addr())
+	defer conn.Close()
+	sendRequest(t, cs)
+
+	// The relay fails terminally after maxAttempts; wait for that status.
+	var resp RawMessage
+	if err := cs.RecvMsg(&resp); err == nil {
+		t.Fatal("expected terminal error from a permanently failing upstream")
+	} else if st, ok := status.FromError(err); !ok || st.Code() != codes.Unavailable {
+		t.Fatalf("expected Unavailable; got %v", err)
+	}
+
+	times := up.times()
+	if len(times) != 8 {
+		t.Fatalf("expected exactly maxAttempts=8 upstream attempts; got %d", len(times))
+	}
+	// Jitter-floor minima for base=25ms, cap=120ms:
+	// 0.8×25 = 20, 0.8×(2×20) = 32, 0.8×(2×32) ≈ 51, 0.8×(2×51.2) ≈ 81,
+	// then the 0.8×cap floor of 96 once doubling passes the cap.
+	minGaps := []time.Duration{
+		20 * time.Millisecond,
+		32 * time.Millisecond,
+		51 * time.Millisecond,
+		81 * time.Millisecond,
+		96 * time.Millisecond,
+		96 * time.Millisecond,
+		96 * time.Millisecond,
+	}
+	for i, min := range minGaps {
+		got := times[i+1].Sub(times[i])
+		if got < min {
+			t.Errorf("gap %d→%d = %v; want ≥ %v (backoff missing or not growing)", i, i+1, got, min)
+		}
+	}
+}
+
+// A half-open backend admits exactly one in-flight canary: the first
+// pickConn claims it via Acquire, and a second pickConn arriving before
+// the canary resolves must fall through to the next candidate. The legacy
+// read-only Allow gate could not give this guarantee.
+func TestChainStreamPickConnClaimsHalfOpenCanary(t *testing.T) {
+	bs := []*backend.Backend{
+		{
+			Name:      "primary",
+			Coverage:  backend.Coverage{Kind: backend.CovArchive},
+			Weight:    200,
+			Endpoints: map[types.Protocol]string{types.ProtoChainStream: "127.0.0.1:19011"},
+		},
+		{
+			Name:      "fallback",
+			Coverage:  backend.Coverage{Kind: backend.CovArchive},
+			Weight:    100,
+			Endpoints: map[types.Protocol]string{types.ProtoChainStream: "127.0.0.1:19012"},
+		},
+	}
+	reg := backend.NewRegistry(bs)
+	h := healthreg.NewRegistry()
+	for _, bb := range bs {
+		h.Update(healthreg.Snapshot{
+			Backend: bb.Name, Protocol: types.ProtoRPC, Healthy: true, LatestHeight: 100000,
+		})
+		h.Update(healthreg.Snapshot{
+			Backend: bb.Name, Protocol: types.ProtoChainStream, Healthy: true,
+		})
+	}
+	cm := circuit.NewManager(circuit.Policy{
+		ErrorThreshold: 0.5,
+		MinRequests:    2,
+		OpenDuration:   20 * time.Millisecond,
+	})
+	gp := pool.NewGRPCPool(time.Minute)
+	defer gp.CloseAll()
+	d := NewDirector(selector.NewRangeSelector(reg, h, cm, 0), cm, gp)
+
+	// Trip primary's breaker, then let the cooldown elapse so the selector
+	// readmits it as a (half-open-probe) candidate. The pool's gRPC dial is
+	// lazy, so no live upstream is needed.
+	cm.Record("primary", types.ProtoChainStream, false)
+	cm.Record("primary", types.ProtoChainStream, false)
+	time.Sleep(40 * time.Millisecond)
+
+	name, conn := d.pickConn(context.Background(), "")
+	if conn == nil || name != "primary" {
+		t.Fatalf("first pickConn should claim the half-open primary canary; chose %q", name)
+	}
+	name, conn = d.pickConn(context.Background(), "")
+	if conn == nil || name != "fallback" {
+		t.Fatalf("second pickConn must skip primary while its canary is unresolved; chose %q", name)
+	}
+
+	// The held admission resolves like any attempt outcome: a canary
+	// success closes the breaker.
+	d.circuit.Record("primary", types.ProtoChainStream, true)
+	if st := cm.State("primary", types.ProtoChainStream); st != circuit.StateClosed {
+		t.Fatalf("canary success should close the breaker; state %s", st)
 	}
 }
 
