@@ -157,6 +157,24 @@ func TestRouteByHeightFallsBackToArchive(t *testing.T) {
 	}
 }
 
+func TestTxSearchHeightQueryRoutesToShard(t *testing.T) {
+	rig := setup(t)
+	defer rig.close()
+
+	resp, err := http.Get(rig.rpc.URL + `/tx_search?query=%22tx.height=12345%22`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), `"served_by":"shard1"`) {
+		t.Fatalf("expected shard1 for tx_search height query, got %s", body)
+	}
+	if rig.shard.hits.Load() != 1 || rig.archive.hits.Load() != 0 {
+		t.Errorf("hits: archive=%d shard=%d", rig.archive.hits.Load(), rig.shard.hits.Load())
+	}
+}
+
 func TestFailoverOnUpstream5xx(t *testing.T) {
 	rig := setup(t)
 	defer rig.close()

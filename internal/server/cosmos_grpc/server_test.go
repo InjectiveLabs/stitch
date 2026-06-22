@@ -428,15 +428,17 @@ func TestGRPCDeadlineExpiryRecordsFailure(t *testing.T) {
 	defer cancel()
 	_, _ = healthpb.NewHealthClient(frontConn).Check(ctx, &healthpb.HealthCheckRequest{Service: ""})
 
-	// Give the post-call wrapper time to resolve the outcome.
-	time.Sleep(20 * time.Millisecond)
-
 	// With the fix: DeadlineExceeded falls through to RecordOutcome(false),
 	// and with MinRequests=1 the single failure trips the breaker open.
-	// Acquire should now return false.
-	if cm.Acquire("hang", types.ProtoGRPC) {
-		cm.Release("hang", types.ProtoGRPC) // clean up the admission
-		t.Fatal("expected breaker to open after deadline expiry; Acquire returned true (neutral Release was used instead of RecordOutcome)")
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if cm.State("hang", types.ProtoGRPC) == circuit.StateOpen {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if st := cm.State("hang", types.ProtoGRPC); st != circuit.StateOpen {
+		t.Fatalf("expected breaker to open after deadline expiry; state %s (neutral Release was used instead of RecordOutcome)", st)
 	}
 }
 

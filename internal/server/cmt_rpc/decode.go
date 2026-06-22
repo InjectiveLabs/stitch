@@ -6,6 +6,8 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -72,6 +74,7 @@ func decodeURI(r *http.Request) decoded {
 			}
 		}
 	}
+	applyURIHeightHints(&d.key, method, q, r.URL.RawQuery)
 	if spec.HashParam != "" {
 		if hs := q.Get(spec.HashParam); hs != "" {
 			d.key.Hash = []byte(hs)
@@ -130,6 +133,7 @@ func decodeJSONRPC(r *http.Request) (decoded, error) {
 			}
 		}
 	}
+	applyJSONHeightHints(&d.key, req.Method, req.Params)
 	if spec.HashParam != "" {
 		if hs := paramFromJSON(req.Params, spec.HashParam, 0); hs != "" {
 			d.key.Hash = []byte(hs)
@@ -141,11 +145,18 @@ func decodeJSONRPC(r *http.Request) (decoded, error) {
 // paramFromJSON extracts a named parameter from a JSON-RPC params payload.
 // Object form returns params[name]; array form returns params[arrayIdx].
 func paramFromJSON(raw json.RawMessage, name string, arrayIdx int) string {
+	return paramFromJSONAny(raw, []string{name}, arrayIdx)
+}
+
+func paramFromJSONAny(raw json.RawMessage, names []string, arrayIdx int) string {
 	raw = bytes.TrimSpace(raw)
 	if len(raw) == 0 {
 		return ""
 	}
 	if raw[0] == '[' {
+		if arrayIdx < 0 {
+			return ""
+		}
 		var arr []json.RawMessage
 		if err := json.Unmarshal(raw, &arr); err != nil {
 			return ""
@@ -160,11 +171,11 @@ func paramFromJSON(raw json.RawMessage, name string, arrayIdx int) string {
 		if err := json.Unmarshal(raw, &obj); err != nil {
 			return ""
 		}
-		v, ok := obj[name]
-		if !ok {
-			return ""
+		for _, name := range names {
+			if v, ok := obj[name]; ok {
+				return unquoteRaw(v)
+			}
 		}
-		return unquoteRaw(v)
 	}
 	return ""
 }
@@ -187,11 +198,192 @@ func parseHeight(s string) (int64, bool) {
 	if s == "" || s == "0" {
 		return 0, false
 	}
+	s = strings.TrimSpace(strings.Trim(s, `"'`))
+	if s == "" || s == "0" {
+		return 0, false
+	}
 	// CometBFT accepts both decimal and 0x… in some clients.
 	if strings.HasPrefix(s, "0x") || strings.HasPrefix(s, "0X") {
 		h, err := strconv.ParseInt(s[2:], 16, 64)
-		return h, err == nil
+		return h, err == nil && h > 0
 	}
 	h, err := strconv.ParseInt(s, 10, 64)
-	return h, err == nil
+	return h, err == nil && h > 0
+}
+
+var (
+	heightParamNames      = []string{"height", "block_height", "blockHeight"}
+	rangeLowerParamNames  = []string{"minHeight", "min_height", "fromHeight", "from_height"}
+	rangeUpperParamNames  = []string{"maxHeight", "max_height", "toHeight", "to_height"}
+	eventHeightConstraint = regexp.MustCompile(`(?i)(?:tx|block)\.height\s*(<=|>=|=|<|>)\s*['"]?(0x[0-9a-f]+|[0-9]+)['"]?`)
+)
+
+const maxInt64 = 1<<63 - 1
+
+type heightBounds struct {
+	lower   *int64
+	upper   *int64
+	invalid bool
+}
+
+func applyURIHeightHints(key *types.RouteKey, method string, q url.Values, rawQuery string) {
+	if key.Height != nil || key.Range != nil {
+		return
+	}
+	if v := firstQueryValue(q, heightParamNames); v != "" {
+		if h, ok := parseHeight(v); ok {
+			setPointHeight(key, h)
+			return
+		}
+	}
+	if applyRangeParamHints(key, firstQueryValue(q, rangeLowerParamNames), firstQueryValue(q, rangeUpperParamNames)) {
+		return
+	}
+	if (method == "tx_search" || method == "block_search") && applyEventQueryHeightHints(key, q.Get("query")) {
+		return
+	}
+	// Some clients put the event expression into the raw query string
+	// directly or double-encode the `query` value. The decoded values above
+	// are preferred, but scanning RawQuery keeps routing resilient.
+	if decoded, err := url.QueryUnescape(rawQuery); err == nil {
+		_ = applyEventQueryHeightHints(key, decoded)
+	}
+}
+
+func applyJSONHeightHints(key *types.RouteKey, method string, params json.RawMessage) {
+	if key.Height != nil || key.Range != nil {
+		return
+	}
+	if v := paramFromJSONAny(params, heightParamNames, -1); v != "" {
+		if h, ok := parseHeight(v); ok {
+			setPointHeight(key, h)
+			return
+		}
+	}
+	lowerIdx, upperIdx := -1, -1
+	if method == "blockchain" {
+		lowerIdx, upperIdx = 0, 1
+	}
+	if applyRangeParamHints(
+		key,
+		paramFromJSONAny(params, rangeLowerParamNames, lowerIdx),
+		paramFromJSONAny(params, rangeUpperParamNames, upperIdx),
+	) {
+		return
+	}
+	if method == "tx_search" || method == "block_search" {
+		_ = applyEventQueryHeightHints(key, paramFromJSONAny(params, []string{"query"}, 0))
+	}
+}
+
+func firstQueryValue(q url.Values, names []string) string {
+	for _, name := range names {
+		if v := q.Get(name); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+func applyRangeParamHints(key *types.RouteKey, lower, upper string) bool {
+	var b heightBounds
+	if h, ok := parseHeight(lower); ok {
+		b.add(">=", h)
+	}
+	if h, ok := parseHeight(upper); ok {
+		b.add("<=", h)
+	}
+	return b.apply(key)
+}
+
+func applyEventQueryHeightHints(key *types.RouteKey, query string) bool {
+	if query == "" {
+		return false
+	}
+	var b heightBounds
+	for _, m := range eventHeightConstraint.FindAllStringSubmatch(query, -1) {
+		if len(m) != 3 {
+			continue
+		}
+		h, ok := parseHeight(m[2])
+		if !ok {
+			continue
+		}
+		b.add(m[1], h)
+	}
+	return b.apply(key)
+}
+
+func (b *heightBounds) add(op string, h int64) {
+	switch op {
+	case "=":
+		b.maxLower(h)
+		b.minUpper(h)
+	case ">=":
+		b.maxLower(h)
+	case ">":
+		if h == maxInt64 {
+			b.invalid = true
+			return
+		}
+		b.maxLower(h + 1)
+	case "<=":
+		b.minUpper(h)
+	case "<":
+		if h <= 1 {
+			b.invalid = true
+			return
+		}
+		b.minUpper(h - 1)
+	}
+}
+
+func (b *heightBounds) maxLower(h int64) {
+	if b.lower == nil || h > *b.lower {
+		v := h
+		b.lower = &v
+	}
+}
+
+func (b *heightBounds) minUpper(h int64) {
+	if b.upper == nil || h < *b.upper {
+		v := h
+		b.upper = &v
+	}
+}
+
+func (b heightBounds) apply(key *types.RouteKey) bool {
+	if b.invalid || (b.lower == nil && b.upper == nil) {
+		return false
+	}
+	if b.lower != nil && b.upper != nil {
+		if *b.lower > *b.upper {
+			return false
+		}
+		if *b.lower == *b.upper {
+			setPointHeight(key, *b.lower)
+			return true
+		}
+	}
+	key.Height = nil
+	key.Range = &types.HeightRange{
+		Lower: cloneInt64Ptr(b.lower),
+		Upper: cloneInt64Ptr(b.upper),
+	}
+	key.Class = types.ClassByHeightRange
+	return true
+}
+
+func setPointHeight(key *types.RouteKey, h int64) {
+	key.Height = &h
+	key.Range = nil
+	key.Class = types.ClassByHeight
+}
+
+func cloneInt64Ptr(in *int64) *int64 {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	return &out
 }

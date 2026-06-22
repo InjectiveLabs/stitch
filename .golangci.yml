@@ -1,32 +1,46 @@
+version: "2"
 run:
-  timeout: 5m
   tests: true
-
 linters:
-  disable-all: true
+  default: none
   enable:
     - errcheck
+    - forbidigo
     - gosec
     - govet
     - ineffassign
     - revive
     - staticcheck
     - unused
-    - forbidigo
-
-linters-settings:
-  forbidigo:
-    forbid:
-      - p: "^fmt\\.Print.*$"
-        msg: "use internal/log (slog) instead of fmt.Print*"
-      - p: "^log\\.Print.*$"
-        msg: "use internal/log (slog) instead of stdlib log"
-
-issues:
-  exclude-rules:
-    - path: cmd/stitch/main\.go
-      linters:
-        - forbidigo
-    - path: internal/cmd/.*\.go
-      linters:
-        - forbidigo
+  settings:
+    forbidigo:
+      forbid:
+        - pattern: ^fmt\.Print.*$
+          msg: use internal/log (slog) instead of fmt.Print*
+        - pattern: ^log\.Print.*$
+          msg: use internal/log (slog) instead of stdlib log
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    rules:
+      - linters:
+          - forbidigo
+        path: cmd/stitch/main\.go
+      - linters:
+          - forbidigo
+        path: internal/cmd/.*\.go
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
+formatters:
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$

@@ -6,12 +6,12 @@ package types
 type Protocol string
 
 const (
-	ProtoRPC         Protocol = "rpc"          // CometBFT JSON-RPC + URI
-	ProtoGRPC        Protocol = "grpc"         // Cosmos gRPC
-	ProtoAPI         Protocol = "api"          // Cosmos REST (gRPC-Gateway)
-	ProtoEthRPC      Protocol = "eth_rpc"      // EVM JSON-RPC over HTTP
-	ProtoEthWS       Protocol = "eth_ws"       // EVM JSON-RPC over WebSocket
-	ProtoChainStream Protocol = "chainstream"  // injective.stream.v* gRPC
+	ProtoRPC         Protocol = "rpc"         // CometBFT JSON-RPC + URI
+	ProtoGRPC        Protocol = "grpc"        // Cosmos gRPC
+	ProtoAPI         Protocol = "api"         // Cosmos REST (gRPC-Gateway)
+	ProtoEthRPC      Protocol = "eth_rpc"     // EVM JSON-RPC over HTTP
+	ProtoEthWS       Protocol = "eth_ws"      // EVM JSON-RPC over WebSocket
+	ProtoChainStream Protocol = "chainstream" // injective.stream.v* gRPC
 )
 
 // MethodClass classifies how a method is routed and whether failover/retry
@@ -28,6 +28,10 @@ const (
 
 	// ClassByHeight: route by RouteKey.Height.
 	ClassByHeight
+
+	// ClassByHeightRange: route to a backend that covers every height in
+	// RouteKey.Range.
+	ClassByHeightRange
 
 	// ClassByHash: hash → height memo (phase 6); fan-out to candidates on miss.
 	ClassByHash
@@ -47,6 +51,8 @@ func (c MethodClass) String() string {
 		return "latest"
 	case ClassByHeight:
 		return "by_height"
+	case ClassByHeightRange:
+		return "by_height_range"
 	case ClassByHash:
 		return "by_hash"
 	case ClassSubscribe:
