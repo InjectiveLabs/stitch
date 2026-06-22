@@ -137,7 +137,7 @@ func (m *resumeMock) handle(w http.ResponseWriter, r *http.Request) {
 	<-subDone
 }
 
-func setupResume(t *testing.T, primary, fallback *resumeMock) (*httptest.Server, func()) {
+func setupResume(t *testing.T, primary, fallback *resumeMock) (*httptest.Server, *health.Registry, func()) {
 	t.Helper()
 	bs := []*backend.Backend{
 		{
@@ -169,14 +169,14 @@ func setupResume(t *testing.T, primary, fallback *resumeMock) (*httptest.Server,
 	sel := selector.NewRangeSelector(reg, h, cm, 0)
 	srv := New("ignored", sel)
 	front := httptest.NewServer(srv.Handler())
-	return front, func() { front.Close() }
+	return front, h, func() { front.Close() }
 }
 
 func TestEthWSResumeAcrossUpstreamFailure(t *testing.T) {
 	primary := newResumeMock("primary", 1, 3)   // emits heights 1, 2, 3 then waits
 	fallback := newResumeMock("fallback", 3, 3) // emits 3, 4, 5 — 3 should be deduped
 
-	front, cleanup := setupResume(t, primary, fallback)
+	front, h, cleanup := setupResume(t, primary, fallback)
 	defer cleanup()
 	defer fallback.Close()
 
@@ -248,6 +248,8 @@ func TestEthWSResumeAcrossUpstreamFailure(t *testing.T) {
 
 	// Kill primary mid-stream. Stitch should detect, reconnect to
 	// fallback, replay the subscribe, and dedup the duplicate height 3.
+	h.Update(health.Snapshot{Backend: "primary", Protocol: types.ProtoRPC, Healthy: false})
+	h.Update(health.Snapshot{Backend: "primary", Protocol: types.ProtoEthWS, Healthy: false})
 	primary.Kill()
 
 	// Read heights 4 and 5 from fallback (NOT a duplicate of 3).

@@ -122,7 +122,7 @@ func (m *logsMock) handle(w http.ResponseWriter, r *http.Request) {
 
 type cursorPair struct{ block, logIdx uint64 }
 
-func setupLogsRig(t *testing.T, primary, fallback *logsMock) (*httptest.Server, func()) {
+func setupLogsRig(t *testing.T, primary, fallback *logsMock) (*httptest.Server, *health.Registry, func()) {
 	t.Helper()
 	bs := []*backend.Backend{
 		{
@@ -150,13 +150,13 @@ func setupLogsRig(t *testing.T, primary, fallback *logsMock) (*httptest.Server, 
 	sel := selector.NewRangeSelector(reg, h, cm, 0)
 	srv := New("ignored", sel)
 	front := httptest.NewServer(srv.Handler())
-	return front, func() { front.Close() }
+	return front, h, func() { front.Close() }
 }
 
 func TestEthWSLogsResumeAcrossUpstreamFailure(t *testing.T) {
 	primary := newLogsMock("primary", 1, 3)   // emits blockNumber=1,2,3 logIndex=0,1,2
 	fallback := newLogsMock("fallback", 3, 3) // emits blockNumber=3,4,5 logIndex=0,1,2 — bn=3 deduped
-	front, cleanup := setupLogsRig(t, primary, fallback)
+	front, h, cleanup := setupLogsRig(t, primary, fallback)
 	defer cleanup()
 	defer fallback.Kill()
 
@@ -227,6 +227,8 @@ func TestEthWSLogsResumeAcrossUpstreamFailure(t *testing.T) {
 	// Drain primary's 3 logs at block 1, 2, 3 (logIndex 0, 1, 2 respectively).
 	readN(3)
 
+	h.Update(health.Snapshot{Backend: "primary", Protocol: types.ProtoRPC, Healthy: false})
+	h.Update(health.Snapshot{Backend: "primary", Protocol: types.ProtoEthWS, Healthy: false})
 	primary.Kill()
 
 	// Fallback emits blockNumber 3 (logIndex 0), 4 (logIndex 1), 5 (logIndex 2).
