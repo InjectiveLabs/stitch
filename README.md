@@ -57,7 +57,7 @@ subscription resume, hash-keyed memoization, and broadcast fan-out for tx
 submission. **stitch is what you build instead of all of that.**
 
 The two existing projects in this space — `decentrio/gateway` and
-`InjectiveLabs/subnode` — each pick one or two of those concerns. stitch is
+`notional-labs/subnode` — each pick one or two of those concerns. stitch is
 built from the ground up to do all of them at once, with a clean abstraction
 where each piece is independently testable and replaceable.
 
@@ -469,7 +469,7 @@ Validated under chaos:
 
 ## Comparison to subnode and gateway
 
-|                                  | InjectiveLabs/subnode | decentrio/gateway | **stitch** |
+|                                  | notional-labs/subnode | decentrio/gateway | **stitch** |
 |----------------------------------|:-------------------:|:----------------:|:----------:|
 | Height-aware routing             | ✓                   | ✓                | ✓          |
 | Overlapping-range coverage       | partial             | partial          | first-class |
