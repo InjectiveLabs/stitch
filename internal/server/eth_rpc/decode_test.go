@@ -74,6 +74,65 @@ func TestDecodeRoutesEthGetBalanceWithBlockHashOrNumberObject(t *testing.T) {
 	}
 }
 
+func TestDecodeRoutesEthGetLogsExactBlock(t *testing.T) {
+	body := []byte(`{"jsonrpc":"2.0","id":1,"method":"eth_getLogs","params":[{"fromBlock":"0x1000","toBlock":"0x1000"}]}`)
+	d, _, err := decodeOne(DefaultManifest, body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.key.Class != types.ClassByHeight {
+		t.Errorf("class: %s", d.key.Class)
+	}
+	if d.key.HeightOrZero() != 0x1000 {
+		t.Errorf("height: %#x", d.key.HeightOrZero())
+	}
+}
+
+func TestDecodeRoutesEthGetLogsBlockRange(t *testing.T) {
+	body := []byte(`{"jsonrpc":"2.0","id":1,"method":"eth_getLogs","params":[{"fromBlock":"0x1000","toBlock":"0x10ff"}]}`)
+	d, _, err := decodeOne(DefaultManifest, body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertEthRange(t, d, 0x1000, ptrInt64(0x10ff))
+}
+
+func TestDecodeRoutesEthGetLogsOpenEndedRange(t *testing.T) {
+	body := []byte(`{"jsonrpc":"2.0","id":1,"method":"eth_getLogs","params":[{"fromBlock":"0x1000","toBlock":"latest"}]}`)
+	d, _, err := decodeOne(DefaultManifest, body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertEthRange(t, d, 0x1000, nil)
+}
+
+func TestDecodeRoutesEthGetLogsBlockHash(t *testing.T) {
+	hash := "0x" + repeat("ef", 32)
+	body := []byte(`{"jsonrpc":"2.0","id":1,"method":"eth_getLogs","params":[{"blockHash":"` + hash + `"}]}`)
+	d, _, err := decodeOne(DefaultManifest, body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.key.Class != types.ClassByHash {
+		t.Errorf("class: %s", d.key.Class)
+	}
+	if string(d.key.Hash) != hash {
+		t.Errorf("hash: %s", d.key.Hash)
+	}
+}
+
+func TestDecodeRoutesEthNewFilterBlockRange(t *testing.T) {
+	body := []byte(`{"jsonrpc":"2.0","id":1,"method":"eth_newFilter","params":[{"fromBlock":"0x1000","toBlock":"0x10ff"}]}`)
+	d, _, err := decodeOne(DefaultManifest, body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !d.expectFilterMint {
+		t.Error("eth_newFilter should set expectFilterMint")
+	}
+	assertEthRange(t, d, 0x1000, ptrInt64(0x10ff))
+}
+
 func TestDecodeRoutesBroadcast(t *testing.T) {
 	body := []byte(`{"jsonrpc":"2.0","id":1,"method":"eth_sendRawTransaction","params":["0xf86c..."]}`)
 	d, _, err := decodeOne(DefaultManifest, body)
@@ -158,3 +217,27 @@ func TestDecodeRawIDPreserved(t *testing.T) {
 		t.Errorf("id parse: %v %d", err, id)
 	}
 }
+
+func assertEthRange(t *testing.T, d decoded, lower int64, upper *int64) {
+	t.Helper()
+	if d.key.Class != types.ClassByHeightRange {
+		t.Fatalf("class: %s", d.key.Class)
+	}
+	if d.key.Range == nil {
+		t.Fatal("range is nil")
+	}
+	if d.key.Range.Lower == nil || *d.key.Range.Lower != lower {
+		t.Fatalf("lower: %v", d.key.Range.Lower)
+	}
+	if upper == nil {
+		if d.key.Range.Upper != nil {
+			t.Fatalf("upper: %v", *d.key.Range.Upper)
+		}
+		return
+	}
+	if d.key.Range.Upper == nil || *d.key.Range.Upper != *upper {
+		t.Fatalf("upper: %v", d.key.Range.Upper)
+	}
+}
+
+func ptrInt64(v int64) *int64 { return &v }

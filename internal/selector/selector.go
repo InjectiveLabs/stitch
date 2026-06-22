@@ -60,7 +60,7 @@ func (s *RangeSelector) Candidates(k types.RouteKey) []*backend.Backend {
 	// block N, treat the effective head as at least N. Covers the race
 	// between probe-sourced MaxHead and the actual chain tip without
 	// changing eligibility for queries within the probed window.
-	if h := k.HeightOrZero(); h > head {
+	if h := k.MaxRequestedHeightOrZero(); h > head {
 		head = h
 	}
 
@@ -79,6 +79,10 @@ func (s *RangeSelector) Candidates(k types.RouteKey) []*backend.Backend {
 		}
 		if k.Class == types.ClassByHeight && k.Height != nil {
 			if !b.Coverage.Eligible(*k.Height, head) {
+				continue
+			}
+		} else if k.Class == types.ClassByHeightRange && k.Range != nil {
+			if !rangeEligible(b.Coverage, *k.Range, head) {
 				continue
 			}
 		} else if k.Class == types.ClassLatest || k.Class == types.ClassByHash {
@@ -125,6 +129,21 @@ func (s *RangeSelector) Candidates(k types.RouteKey) []*backend.Backend {
 		out[i] = p.b
 	}
 	return out
+}
+
+func rangeEligible(c backend.Coverage, r types.HeightRange, head int64) bool {
+	lower := int64(1)
+	if r.Lower != nil {
+		lower = *r.Lower
+	}
+	upper := head
+	if r.Upper != nil {
+		upper = *r.Upper
+	}
+	if lower < 1 || upper < lower {
+		return false
+	}
+	return c.Eligible(lower, head) && c.Eligible(upper, head)
 }
 
 // scoreBaseline keeps the weighted inner term strictly positive across the

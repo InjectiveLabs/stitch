@@ -73,6 +73,45 @@ func TestRangeSelectorPrefersNarrowerCoverageForOldBlock(t *testing.T) {
 	}
 }
 
+func TestRangeSelectorPrefersNarrowerCoverageForHeightRange(t *testing.T) {
+	reg, h, cm := mkRegistry(t)
+	s := NewRangeSelector(reg, h, cm, 100)
+
+	lower, upper := int64(100), int64(200)
+	cands := s.Candidates(types.RouteKey{
+		Protocol: types.ProtoRPC,
+		Class:    types.ClassByHeightRange,
+		Range:    &types.HeightRange{Lower: &lower, Upper: &upper},
+	})
+	if len(cands) != 2 {
+		t.Fatalf("expected 2 candidates, got %d", len(cands))
+	}
+	if cands[0].Name != "shard1" {
+		t.Errorf("expected shard1 first, got %s", cands[0].Name)
+	}
+	if cands[1].Name != "archive" {
+		t.Errorf("expected archive second, got %s", cands[1].Name)
+	}
+}
+
+func TestRangeSelectorHeightRangeRequiresFullCoverage(t *testing.T) {
+	reg, h, cm := mkRegistry(t)
+	s := NewRangeSelector(reg, h, cm, 100)
+
+	lower, upper := int64(40000), int64(60000)
+	cands := s.Candidates(types.RouteKey{
+		Protocol: types.ProtoRPC,
+		Class:    types.ClassByHeightRange,
+		Range:    &types.HeightRange{Lower: &lower, Upper: &upper},
+	})
+	if len(cands) != 1 {
+		t.Fatalf("expected only archive, got %d candidates", len(cands))
+	}
+	if cands[0].Name != "archive" {
+		t.Errorf("expected archive, got %s", cands[0].Name)
+	}
+}
+
 func TestRangeSelectorExcludesPrunedFloor(t *testing.T) {
 	reg, h, cm := mkRegistry(t)
 	s := NewRangeSelector(reg, h, cm, 0)

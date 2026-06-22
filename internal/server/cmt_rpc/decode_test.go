@@ -55,6 +55,55 @@ func TestDecodeURIBlockByHash(t *testing.T) {
 	}
 }
 
+func TestDecodeURITxSearchHeightQuery(t *testing.T) {
+	r := httptest.NewRequest(http.MethodGet, `/tx_search?query=%22tx.height=150017800%22`, nil)
+	d, err := decode(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.key.Method != "tx_search" {
+		t.Errorf("method: %q", d.key.Method)
+	}
+	if d.key.Class != types.ClassByHeight {
+		t.Errorf("class: %s", d.key.Class)
+	}
+	if d.key.HeightOrZero() != 150017800 {
+		t.Errorf("height: %d", d.key.HeightOrZero())
+	}
+}
+
+func TestDecodeURIBlockSearchHeightQuery(t *testing.T) {
+	r := httptest.NewRequest(http.MethodGet, `/block_search?query=block.height%3D12345`, nil)
+	d, err := decode(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.key.Class != types.ClassByHeight {
+		t.Errorf("class: %s", d.key.Class)
+	}
+	if d.key.HeightOrZero() != 12345 {
+		t.Errorf("height: %d", d.key.HeightOrZero())
+	}
+}
+
+func TestDecodeURISearchHeightRange(t *testing.T) {
+	r := httptest.NewRequest(http.MethodGet, `/tx_search?query=tx.height%3E100%20AND%20tx.height%3C%3D200`, nil)
+	d, err := decode(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertRange(t, d, 101, 200)
+}
+
+func TestDecodeURIBlockchainRange(t *testing.T) {
+	r := httptest.NewRequest(http.MethodGet, `/blockchain?minHeight=10&maxHeight=20`, nil)
+	d, err := decode(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertRange(t, d, 10, 20)
+}
+
 func TestDecodeJSONRPCBlockHeightObject(t *testing.T) {
 	body := []byte(`{"jsonrpc":"2.0","id":1,"method":"block","params":{"height":"5000"}}`)
 	r := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(body))
@@ -74,6 +123,56 @@ func TestDecodeJSONRPCBlockHeightObject(t *testing.T) {
 	if !bytes.Equal(d.body, body) {
 		t.Error("body should be buffered for retry")
 	}
+}
+
+func TestDecodeJSONRPCTxSearchHeightObject(t *testing.T) {
+	body := []byte(`{"jsonrpc":"2.0","id":1,"method":"tx_search","params":{"query":"tx.height=150017800"}}`)
+	r := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(body))
+	d, err := decode(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.key.Class != types.ClassByHeight {
+		t.Errorf("class: %s", d.key.Class)
+	}
+	if d.key.HeightOrZero() != 150017800 {
+		t.Errorf("height: %d", d.key.HeightOrZero())
+	}
+}
+
+func TestDecodeJSONRPCTxSearchHeightArray(t *testing.T) {
+	body := []byte(`{"jsonrpc":"2.0","id":1,"method":"tx_search","params":["tx.height=150017800",false,1,30,"asc"]}`)
+	r := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(body))
+	d, err := decode(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.key.Class != types.ClassByHeight {
+		t.Errorf("class: %s", d.key.Class)
+	}
+	if d.key.HeightOrZero() != 150017800 {
+		t.Errorf("height: %d", d.key.HeightOrZero())
+	}
+}
+
+func TestDecodeJSONRPCBlockchainRangeObject(t *testing.T) {
+	body := []byte(`{"jsonrpc":"2.0","id":1,"method":"blockchain","params":{"minHeight":"10","maxHeight":"20"}}`)
+	r := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(body))
+	d, err := decode(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertRange(t, d, 10, 20)
+}
+
+func TestDecodeJSONRPCBlockchainRangeArray(t *testing.T) {
+	body := []byte(`{"jsonrpc":"2.0","id":1,"method":"blockchain","params":[10,20]}`)
+	r := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(body))
+	d, err := decode(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertRange(t, d, 10, 20)
 }
 
 func TestDecodeJSONRPCBroadcastTxSync(t *testing.T) {
@@ -105,9 +204,9 @@ func TestDecodeJSONRPCInvalid(t *testing.T) {
 
 func TestParseHeightHexAndDecimal(t *testing.T) {
 	for _, c := range []struct {
-		in   string
-		out  int64
-		ok   bool
+		in  string
+		out int64
+		ok  bool
 	}{
 		{"123", 123, true},
 		{"0x10", 16, true},
@@ -143,4 +242,20 @@ func TestRequestBodyReplayable(t *testing.T) {
 	got, err := r.Body.Close, []byte(nil)
 	_ = got
 	_ = err
+}
+
+func assertRange(t *testing.T, d decoded, lower, upper int64) {
+	t.Helper()
+	if d.key.Class != types.ClassByHeightRange {
+		t.Fatalf("class: %s", d.key.Class)
+	}
+	if d.key.Range == nil {
+		t.Fatal("range is nil")
+	}
+	if d.key.Range.Lower == nil || *d.key.Range.Lower != lower {
+		t.Fatalf("lower: %v", d.key.Range.Lower)
+	}
+	if d.key.Range.Upper == nil || *d.key.Range.Upper != upper {
+		t.Fatalf("upper: %v", d.key.Range.Upper)
+	}
 }

@@ -127,6 +127,7 @@ func buildRouteKey(method string, s Spec, params json.RawMessage) types.RouteKey
 	case s.Height == "latest":
 		key.Class = types.ClassLatest
 	}
+	applyFilterObjectRoute(&key, method, params)
 
 	// State-override on eth_call disables caching even when finalized.
 	if s.StateOverrideParam != nil {
@@ -135,4 +136,51 @@ func buildRouteKey(method string, s Spec, params json.RawMessage) types.RouteKey
 		}
 	}
 	return key
+}
+
+func applyFilterObjectRoute(key *types.RouteKey, method string, params json.RawMessage) {
+	switch method {
+	case "eth_getLogs", "eth_newFilter":
+	default:
+		return
+	}
+	raw := bytes.TrimSpace(param(params, 0))
+	if len(raw) == 0 || raw[0] != '{' {
+		return
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		return
+	}
+	if h, ok := extractBlockHash(obj["blockHash"]); ok {
+		key.Hash = h
+		key.Height = nil
+		key.Range = nil
+		key.Class = types.ClassByHash
+		return
+	}
+
+	lower, lowerOK := filterBlockNumber(obj["fromBlock"])
+	upper, upperOK := filterBlockNumber(obj["toBlock"])
+	switch {
+	case lowerOK && upperOK && lower == upper:
+		key.Height = &lower
+		key.Range = nil
+		key.Class = types.ClassByHeight
+	case lowerOK && upperOK && lower < upper:
+		key.Height = nil
+		key.Range = &types.HeightRange{Lower: &lower, Upper: &upper}
+		key.Class = types.ClassByHeightRange
+	case lowerOK && !upperOK:
+		key.Height = nil
+		key.Range = &types.HeightRange{Lower: &lower}
+		key.Class = types.ClassByHeightRange
+	}
+}
+
+func filterBlockNumber(raw json.RawMessage) (int64, bool) {
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return 0, false
+	}
+	return extractBlockNumber(raw)
 }

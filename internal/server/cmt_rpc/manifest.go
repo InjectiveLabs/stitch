@@ -5,13 +5,13 @@ import "github.com/decentrio/stitch/internal/types"
 // MethodSpec describes how one CometBFT RPC method is routed. Phase 1 keeps
 // the manifest as in-code data; later phases may load it from YAML.
 type MethodSpec struct {
-	Name        string
-	Class       types.MethodClass
-	HeightParam string // param name for height (uri+json-rpc)
-	HashParam   string // param name for hash
-	HeightOptional bool // if true, treat absent height as latest
-	Idempotent  bool
-	Cacheable   bool
+	Name           string
+	Class          types.MethodClass
+	HeightParam    string // param name for height (uri+json-rpc)
+	HashParam      string // param name for hash
+	HeightOptional bool   // if true, treat absent height as latest
+	Idempotent     bool
+	Cacheable      bool
 }
 
 // Manifest is the canonical method table for CometBFT RPC. Reference for
@@ -55,8 +55,8 @@ var Manifest = func() map[string]MethodSpec {
 	add(MethodSpec{Name: "header_by_hash", HashParam: "hash", Class: types.ClassByHash, Idempotent: true, Cacheable: true})
 	add(MethodSpec{Name: "tx", HashParam: "hash", Class: types.ClassByHash, Idempotent: true, Cacheable: true})
 
-	// Search methods iterate backends; phase 1 routes to latest, phase 6
-	// will smarten this with hash memo / height range parsing.
+	// Search methods route by tx.height/block.height when their event query
+	// contains block-height constraints; otherwise they fall back to latest.
 	add(MethodSpec{Name: "tx_search", Class: types.ClassLatest, Idempotent: true})
 	add(MethodSpec{Name: "block_search", Class: types.ClassLatest, Idempotent: true})
 
@@ -65,7 +65,7 @@ var Manifest = func() map[string]MethodSpec {
 		add(MethodSpec{Name: name, Class: types.ClassLatest, Idempotent: true})
 	}
 
-	// Range query — uses min_height/max_height; phase 1 routes to latest.
+	// Range query — routes by minHeight/maxHeight when supplied.
 	add(MethodSpec{Name: "blockchain", Class: types.ClassLatest, Idempotent: true})
 
 	// Tx broadcast: phase 1 routes to a single healthy backend; phase 6

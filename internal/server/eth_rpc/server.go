@@ -266,7 +266,8 @@ func ethHashCacheKey(method, hash string) string {
 	switch method {
 	case "eth_getBlockByHash",
 		"eth_getBlockTransactionCountByHash",
-		"eth_getTransactionByBlockHashAndIndex":
+		"eth_getTransactionByBlockHashAndIndex",
+		"eth_getLogs":
 		return cache.EthBlockKey(hash)
 	case "eth_getTransactionByHash",
 		"eth_getTransactionReceipt",
