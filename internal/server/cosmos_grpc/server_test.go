@@ -362,8 +362,9 @@ func TestGRPCDirectorHalfOpenAdmitsSingleCanary(t *testing.T) {
 // FAILURE (not a neutral Release). Under the old wide predicate
 // (ss.Context().Err() != nil), DeadlineExceeded would have triggered a
 // Release, leaving the circuit closed even though the backend was too slow.
-// With the fix (errors.Is(..., context.Canceled)), DeadlineExceeded falls
-// through to RecordOutcome(name, false).
+// With the fix, an expired gRPC deadline falls through to
+// RecordOutcome(name, false) even if grpc-go exposes the stream context as
+// context.Canceled.
 //
 // Red-first: if run against the old predicate, RecordOutcome(false) is never
 // called; the breaker stays closed and the final Acquire returns true, causing
