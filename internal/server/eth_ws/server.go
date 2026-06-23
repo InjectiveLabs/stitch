@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -125,7 +126,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	clientConn, err := s.upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.FromCtx(ctx).Warn("eth_ws: upgrade failed", "err", err.Error())
+		if plainHTTPUpgradeError(err) {
+			log.FromCtx(ctx).Debug("eth_ws: non-websocket request", "err", err.Error())
+		} else {
+			log.FromCtx(ctx).Warn("eth_ws: upgrade failed", "err", err.Error())
+		}
 		return
 	}
 	if !s.tracker.Track(clientConn) {
@@ -142,4 +147,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err := sess.Run(ctx); err != nil {
 		log.FromCtx(ctx).Debug("eth_ws: session ended", "err", err.Error())
 	}
+}
+
+func plainHTTPUpgradeError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "not using the websocket protocol") ||
+		strings.Contains(msg, "'upgrade' token not found")
 }

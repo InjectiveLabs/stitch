@@ -89,6 +89,34 @@ func TestDrainResultsReleasesCancelledLoser(t *testing.T) {
 	}
 }
 
+func TestReleaseOnCancelOnlyForClientDisconnect(t *testing.T) {
+	err := fmt.Errorf("Post %q: %w", "http://backend", context.Canceled)
+
+	clientGone, cancelClient := context.WithCancel(context.Background())
+	attemptCtx, cancelAttempt := context.WithCancel(context.Background())
+	cancelClient()
+	defer cancelAttempt()
+	if !releaseOnCancel(clientGone, attemptCtx, err) {
+		t.Fatal("client cancellation should release the circuit admission")
+	}
+
+	timedOut, cancelTimeout := context.WithTimeout(context.Background(), time.Nanosecond)
+	defer cancelTimeout()
+	<-timedOut.Done()
+	if releaseOnCancel(context.Background(), timedOut, err) {
+		t.Fatal("attempt timeout must be recorded as a backend failure, not a neutral release")
+	}
+}
+
+func TestPickErrReportIncludesCanceledBackend(t *testing.T) {
+	report := pickErrReport([]broadcastResult{
+		{backend: "sentry-tip", err: fmt.Errorf("Post %q: %w", "http://sentry-tip", context.Canceled)},
+	})
+	if !strings.Contains(report, "sentry-tip") || strings.Contains(report, "all upstream attempts failed") {
+		t.Fatalf("expected backend-specific canceled report, got %q", report)
+	}
+}
+
 // A leg cancelled BEFORE any winner exists — the client disconnected
 // mid-broadcast — says nothing about its backend either: the pre-winner
 // result loop must release the admission, not record a failure (the

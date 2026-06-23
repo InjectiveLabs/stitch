@@ -96,7 +96,7 @@ func (f *HTTP) Broadcast(w http.ResponseWriter, r *http.Request, key types.Route
 		// recording a failure — the same convention drainResults applies
 		// to post-winner losers. Deadline expiry is NOT cancellation: a
 		// timed-out leg still debits its backend below.
-		if errors.Is(res.err, context.Canceled) {
+		if releaseOnCancel(r.Context(), ctx, res.err) {
 			f.circuit.Release(res.backend, key.Protocol)
 		} else {
 			f.circuit.Record(res.backend, key.Protocol, false)
@@ -108,9 +108,8 @@ func (f *HTTP) Broadcast(w http.ResponseWriter, r *http.Request, key types.Route
 		report := pickErrReport(failures)
 		writeJSONError(w, http.StatusBadGateway, report)
 		log.FromCtx(r.Context()).Error("broadcast: all candidates failed",
-			"protocol", string(key.Protocol),
-			"method", key.Method,
 			"dispatched", dispatched,
+			"failures", failureReports(failures),
 			"err", report,
 		)
 		metrics.BroadcastFanout.WithLabelValues("total_failure").Inc()
@@ -201,9 +200,35 @@ func pickErrReport(failures []broadcastResult) string {
 		}
 	}
 	for _, f := range failures {
+		if f.err != nil {
+			return fmt.Sprintf("backend %s: %v", f.backend, f.err)
+		}
+	}
+	for _, f := range failures {
 		if f.resp != nil {
 			return fmt.Sprintf("backend %s: status %d", f.backend, f.resp.StatusCode)
 		}
 	}
 	return "all upstream attempts failed"
+}
+
+func failureReports(failures []broadcastResult) []string {
+	out := make([]string, 0, len(failures))
+	for _, f := range failures {
+		switch {
+		case f.err != nil:
+			out = append(out, fmt.Sprintf("%s: %v", f.backend, f.err))
+		case f.resp != nil:
+			out = append(out, fmt.Sprintf("%s: status %d", f.backend, f.resp.StatusCode))
+		default:
+			out = append(out, fmt.Sprintf("%s: no response", f.backend))
+		}
+	}
+	return out
+}
+
+func releaseOnCancel(clientCtx, attemptCtx context.Context, err error) bool {
+	return errors.Is(err, context.Canceled) &&
+		clientCtx.Err() != nil &&
+		!errors.Is(attemptCtx.Err(), context.DeadlineExceeded)
 }

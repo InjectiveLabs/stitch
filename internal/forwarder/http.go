@@ -98,8 +98,6 @@ func (f *HTTP) Forward(w http.ResponseWriter, r *http.Request, key types.RouteKe
 		// leave the breakers of untried backends alone.
 		if r.Context().Err() != nil {
 			log.FromCtx(r.Context()).Debug("client disconnected; abandoning forward",
-				"protocol", string(key.Protocol),
-				"method", key.Method,
 				"attempts", attempts,
 			)
 			return
@@ -156,7 +154,6 @@ func (f *HTTP) Forward(w http.ResponseWriter, r *http.Request, key types.RouteKe
 				f.circuit.Release(b.Name, key.Protocol)
 				log.FromCtx(r.Context()).Debug("client gone mid-attempt; abandoning forward",
 					"backend", b.Name,
-					"protocol", string(key.Protocol),
 					"attempt", attempts,
 				)
 				return
@@ -166,7 +163,6 @@ func (f *HTTP) Forward(w http.ResponseWriter, r *http.Request, key types.RouteKe
 			metrics.FailoverAttempts.WithLabelValues(b.Name, "next", classifyErr(err)).Inc()
 			log.FromCtx(r.Context()).Warn("upstream attempt failed",
 				"backend", b.Name,
-				"protocol", string(key.Protocol),
 				"err", err.Error(),
 				"attempt", attempts,
 			)
@@ -205,7 +201,6 @@ func (f *HTTP) Forward(w http.ResponseWriter, r *http.Request, key types.RouteKe
 			metrics.RequestDuration.WithLabelValues(string(key.Protocol), key.Class.String(), b.Name).Observe(dur.Seconds())
 			log.FromCtx(r.Context()).Warn("upstream body truncated mid-relay",
 				"backend", b.Name,
-				"protocol", string(key.Protocol),
 				"err", body.err.Error(),
 				"attempt", attempts,
 			)
@@ -235,8 +230,6 @@ func (f *HTTP) Forward(w http.ResponseWriter, r *http.Request, key types.RouteKe
 		lastErr = ErrNoCandidates
 	}
 	log.FromCtx(r.Context()).Error("all upstream attempts failed",
-		"protocol", string(key.Protocol),
-		"method", key.Method,
 		"attempts", attempts,
 		"err", lastErr.Error(),
 	)

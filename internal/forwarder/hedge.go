@@ -142,7 +142,7 @@ func (f *HTTP) Hedge(w http.ResponseWriter, r *http.Request, key types.RouteKey)
 			continue
 		}
 		failures = append(failures, res)
-		if errors.Is(res.err, context.Canceled) {
+		if releaseOnCancel(r.Context(), ctx, res.err) {
 			// Cancelled mid-flight: the outcome says nothing about the
 			// backend, so free the admission claimed at dispatch.
 			f.circuit.Release(res.backend, key.Protocol)
@@ -156,10 +156,9 @@ func (f *HTTP) Hedge(w http.ResponseWriter, r *http.Request, key types.RouteKey)
 		secondaryName = secondary.Name
 	}
 	log.FromCtx(r.Context()).Error("hedge: both candidates failed",
-		"protocol", string(key.Protocol),
-		"method", key.Method,
 		"primary", primary.Name,
 		"secondary", secondaryName,
+		"failures", failureReports(failures),
 		"err", pickErrReport(failures),
 	)
 	writeJSONError(w, http.StatusBadGateway, pickErrReport(failures))
