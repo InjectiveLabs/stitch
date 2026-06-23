@@ -3,7 +3,6 @@ package cosmos_grpc
 import (
 	"context"
 	"errors"
-	"time"
 
 	"github.com/mwitkow/grpc-proxy/proxy"
 	"google.golang.org/grpc"
@@ -24,19 +23,21 @@ func streamHandler(dir *Director) grpc.StreamHandler {
 	inner := proxy.TransparentHandler(dir.Direct)
 	return func(srv any, ss grpc.ServerStream) error {
 		slot := &atomicString{}
+		_, hadDeadline := ss.Context().Deadline()
 		wrapped := &slotStream{ServerStream: ss, ctx: context.WithValue(ss.Context(), chosenBackendKey, slot)}
 		err := inner(srv, wrapped)
 		if name := slot.Get(); name != "" {
 			switch {
 			case err == nil:
 				dir.RecordOutcome(name, true)
-			case errors.Is(ss.Context().Err(), context.Canceled) && !deadlineExpired(ss.Context()):
+			case errors.Is(ss.Context().Err(), context.Canceled) && !hadDeadline:
 				// Convention (mirrors forwarder/broadcast.go drainResults):
 				//   cancellation  = client walked away, neutral Release;
 				//   deadline expiry = backend too slow, recorded failure.
-				// Some grpc-go paths surface an expired client deadline as
-				// context.Canceled on the server stream, so check the actual
-				// deadline before deciding this is neutral.
+				// Some grpc-go paths surface a client deadline as
+				// context.Canceled on the server stream, so a request with a
+				// caller-supplied deadline is treated as part of the backend's
+				// service budget rather than a neutral disconnect.
 				dir.ReleaseOutcome(name)
 			default:
 				dir.RecordOutcome(name, false)
@@ -44,14 +45,6 @@ func streamHandler(dir *Director) grpc.StreamHandler {
 		}
 		return err
 	}
-}
-
-func deadlineExpired(ctx context.Context) bool {
-	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		return true
-	}
-	deadline, ok := ctx.Deadline()
-	return ok && !time.Now().Before(deadline)
 }
 
 // slotStream overrides Context() so the director sees the slot. All other
