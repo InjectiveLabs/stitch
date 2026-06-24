@@ -63,9 +63,10 @@ type PoliciesConfig struct {
 // default-denied because they leak key material, mutate node state, or
 // dump full storage tries (eth's debug_*, personal_*, miner_*).
 //
-// Operators opt-in specific methods by name; everything else stays
-// default-denied. There are no tiers — open-source stitch is meant to be
-// run privately, with operators fronting it for their own auth needs.
+// Operators opt-in specific methods by name, or use "*" for trusted local
+// deployments that should expose every dangerous method. Everything else
+// stays default-denied. There are no tiers — open-source stitch is meant
+// to be run privately, with operators fronting it for their own auth needs.
 type DangerousMethodsPolicy struct {
 	Allow []string `yaml:"allow,omitempty"`
 }
