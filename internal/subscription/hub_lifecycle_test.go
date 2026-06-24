@@ -316,8 +316,19 @@ func TestHubSlowConsumerDropCountsMetric(t *testing.T) {
 	if slow.DropCount() == 0 {
 		t.Fatal("slow consumer accumulated no drops")
 	}
-	if got := testutil.ToFloat64(lbl) - before; got < float64(slow.DropCount()) {
-		t.Errorf("slow_consumer metric delta = %v; want ≥ DropCount %d", got, slow.DropCount())
+	slow.Detach()
+	drops := slow.DropCount()
+	var got float64
+	deadline = time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		got = testutil.ToFloat64(lbl) - before
+		if got >= float64(drops) {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got < float64(drops) {
+		t.Errorf("slow_consumer metric delta = %v; want ≥ DropCount %d", got, drops)
 	}
 }
 

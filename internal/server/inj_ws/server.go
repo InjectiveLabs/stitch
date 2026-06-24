@@ -29,6 +29,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -175,7 +176,11 @@ func (s *Server) serveWS(w http.ResponseWriter, r *http.Request) {
 
 	clientConn, err := s.upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.FromCtx(ctx).Warn("inj_ws: upgrade failed", "err", err.Error())
+		if plainHTTPUpgradeError(err) {
+			log.FromCtx(ctx).Debug("inj_ws: non-websocket request", "err", err.Error())
+		} else {
+			log.FromCtx(ctx).Warn("inj_ws: upgrade failed", "err", err.Error())
+		}
 		return
 	}
 	if !s.tracker.Track(clientConn) {
@@ -205,4 +210,13 @@ func notFound(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("content-type", "application/json")
 	w.WriteHeader(http.StatusNotFound)
 	_, _ = w.Write([]byte(`{"error":"path not found; expect ` + EndpointPath + `"}`))
+}
+
+func plainHTTPUpgradeError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "not using the websocket protocol") ||
+		strings.Contains(msg, "'upgrade' token not found")
 }
