@@ -32,6 +32,22 @@ func TestDangerousAllowlistGrantsExplicitMethod(t *testing.T) {
 	}
 }
 
+func TestDangerousAllowlistWildcardGrantsHiddenMethods(t *testing.T) {
+	r := setupEth(t)
+	defer r.close()
+	r.front.SetDangerousAllowlist(NewDangerousAllowlist([]string{"*"}))
+
+	resp := post(t, r.frontT.URL, `{"jsonrpc":"2.0","id":1,"method":"debug_traceCall","params":[{},"0x1"]}`)
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if strings.Contains(string(body), "method not found") {
+		t.Fatalf("debug_traceCall was allowed by wildcard; should reach upstream: %s", body)
+	}
+	if r.archive.hits.Load()+r.shard.hits.Load() == 0 {
+		t.Fatal("wildcard-allowed method did not reach upstream")
+	}
+}
+
 func TestDangerousAllowlistDoesNotLeakOtherMethods(t *testing.T) {
 	r := setupEth(t)
 	defer r.close()
@@ -54,5 +70,12 @@ func TestDangerousAllowlistEmptySliceIsSafeNoOp(t *testing.T) {
 	}
 	if d.Allowed("") {
 		t.Error("empty method should not be allowed")
+	}
+}
+
+func TestDangerousAllowlistWildcardStillRejectsEmptyMethod(t *testing.T) {
+	d := NewDangerousAllowlist([]string{"*"})
+	if d.Allowed("") {
+		t.Error("wildcard should not allow an empty method")
 	}
 }

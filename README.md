@@ -271,6 +271,7 @@ policies:
                                        # per resume)
   dangerous_methods:
     allow:                             # opt-in for debug_*/personal_*/miner_*
+      # - "*"                          # trusted local: expose every hidden EVM method
       - debug_traceCall
       - debug_traceTransaction
 ```
