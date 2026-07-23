@@ -14,15 +14,15 @@ import (
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 
-	"github.com/decentrio/stitch/internal/backend"
-	"github.com/decentrio/stitch/internal/circuit"
-	"github.com/decentrio/stitch/internal/log"
-	"github.com/decentrio/stitch/internal/metrics"
-	"github.com/decentrio/stitch/internal/pool"
-	"github.com/decentrio/stitch/internal/runtime"
-	"github.com/decentrio/stitch/internal/selector"
-	"github.com/decentrio/stitch/internal/subscription"
-	"github.com/decentrio/stitch/internal/types"
+	"github.com/InjectiveLabs/stitch/internal/backend"
+	"github.com/InjectiveLabs/stitch/internal/circuit"
+	"github.com/InjectiveLabs/stitch/internal/log"
+	"github.com/InjectiveLabs/stitch/internal/metrics"
+	"github.com/InjectiveLabs/stitch/internal/pool"
+	"github.com/InjectiveLabs/stitch/internal/runtime"
+	"github.com/InjectiveLabs/stitch/internal/selector"
+	"github.com/InjectiveLabs/stitch/internal/subscription"
+	"github.com/InjectiveLabs/stitch/internal/types"
 )
 
 // Director runs one ChainStream call: receive the StreamRequest, then

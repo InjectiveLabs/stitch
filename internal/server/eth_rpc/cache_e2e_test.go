@@ -7,7 +7,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"github.com/decentrio/stitch/internal/cache"
+	"github.com/InjectiveLabs/stitch/internal/cache"
 )
 
 // silence unused-import warning when reshuffling

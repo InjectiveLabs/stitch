@@ -2,10 +2,10 @@
 //
 // Routing strategy:
 //
-//   1. Read x-cosmos-block-height header (canonical).
-//   2. If absent, parse height from URL path (e.g. /cosmos/.../blocks/{height}).
-//   3. If absent, parse from query string (?height=, ?query=tx.height=N).
-//   4. Otherwise route to a "latest"-eligible backend.
+//  1. Read x-cosmos-block-height header (canonical).
+//  2. If absent, parse height from URL path (e.g. /cosmos/.../blocks/{height}).
+//  3. If absent, parse from query string (?height=, ?query=tx.height=N).
+//  4. Otherwise route to a "latest"-eligible backend.
 package cosmos_rest
 
 import (
@@ -17,10 +17,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/decentrio/stitch/internal/forwarder"
-	"github.com/decentrio/stitch/internal/log"
-	"github.com/decentrio/stitch/internal/runtime"
-	"github.com/decentrio/stitch/internal/types"
+	"github.com/InjectiveLabs/stitch/internal/forwarder"
+	"github.com/InjectiveLabs/stitch/internal/log"
+	"github.com/InjectiveLabs/stitch/internal/runtime"
+	"github.com/InjectiveLabs/stitch/internal/types"
 )
 
 // Server is the Cosmos REST proxy.

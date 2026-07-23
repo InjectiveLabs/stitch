@@ -5,8 +5,8 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
-	"github.com/decentrio/stitch/internal/metrics"
-	"github.com/decentrio/stitch/internal/types"
+	"github.com/InjectiveLabs/stitch/internal/metrics"
+	"github.com/InjectiveLabs/stitch/internal/types"
 )
 
 // Manager owns one Breaker per (backend, protocol) pair. Lazily allocated.

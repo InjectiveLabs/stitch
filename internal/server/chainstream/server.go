@@ -33,10 +33,10 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
 
-	"github.com/decentrio/stitch/internal/circuit"
-	"github.com/decentrio/stitch/internal/log"
-	"github.com/decentrio/stitch/internal/pool"
-	"github.com/decentrio/stitch/internal/selector"
+	"github.com/InjectiveLabs/stitch/internal/circuit"
+	"github.com/InjectiveLabs/stitch/internal/log"
+	"github.com/InjectiveLabs/stitch/internal/pool"
+	"github.com/InjectiveLabs/stitch/internal/selector"
 )
 
 // ChainStreamServiceNames lists the gRPC service prefixes we serve. Used

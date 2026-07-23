@@ -5,7 +5,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/decentrio/stitch/internal/metrics"
+	"github.com/InjectiveLabs/stitch/internal/metrics"
 )
 
 // ResponseCache is a TTL'd LRU storing whole JSON-RPC response bodies.

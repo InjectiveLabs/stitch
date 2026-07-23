@@ -15,7 +15,7 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
-	"github.com/decentrio/stitch/internal/log"
+	"github.com/InjectiveLabs/stitch/internal/log"
 )
 
 // Server is one long-running protocol listener. Start blocks until the
@@ -30,9 +30,9 @@ type Server interface {
 // Manager orchestrates a set of Servers and translates SIGINT/SIGTERM into a
 // drain → shutdown sequence. SIGHUP triggers an optional reload callback.
 type Manager struct {
-	servers        []Server
-	reload         func() error
-	shutdownGrace  time.Duration
+	servers       []Server
+	reload        func() error
+	shutdownGrace time.Duration
 }
 
 func New(shutdownGrace time.Duration) *Manager {

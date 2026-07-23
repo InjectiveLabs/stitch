@@ -4,10 +4,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/decentrio/stitch/internal/backend"
-	"github.com/decentrio/stitch/internal/circuit"
-	"github.com/decentrio/stitch/internal/health"
-	"github.com/decentrio/stitch/internal/types"
+	"github.com/InjectiveLabs/stitch/internal/backend"
+	"github.com/InjectiveLabs/stitch/internal/circuit"
+	"github.com/InjectiveLabs/stitch/internal/health"
+	"github.com/InjectiveLabs/stitch/internal/types"
 )
 
 // BenchmarkCandidates measures the cost of one selector decision over a

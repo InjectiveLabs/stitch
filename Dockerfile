@@ -8,8 +8,8 @@ ARG VERSION=dev
 ARG COMMIT=unknown
 RUN go build -mod=readonly -trimpath \
     -ldflags "-w -s \
-        -X 'github.com/decentrio/stitch/internal/cmd.version=${VERSION}' \
-        -X 'github.com/decentrio/stitch/internal/cmd.commit=${COMMIT}'" \
+        -X 'github.com/InjectiveLabs/stitch/internal/cmd.version=${VERSION}' \
+        -X 'github.com/InjectiveLabs/stitch/internal/cmd.commit=${COMMIT}'" \
     -o /out/stitch ./cmd/stitch
 
 # Distroless for a small, hardened runtime image. Stitch reads no

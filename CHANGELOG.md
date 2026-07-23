@@ -202,5 +202,5 @@ requests to the right one based on height, hash, or method.
   continuity is planned but not yet emitted.
 - No L2 cache (shared Redis). Each replica's L1 is independent.
 
-[Unreleased]: https://github.com/decentrio/stitch/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/decentrio/stitch/releases/tag/v0.1.0
+[Unreleased]: https://github.com/InjectiveLabs/stitch/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/InjectiveLabs/stitch/releases/tag/v0.1.0

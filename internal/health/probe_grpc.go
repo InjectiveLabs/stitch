@@ -6,10 +6,10 @@ import (
 
 	"google.golang.org/grpc/connectivity"
 
-	"github.com/decentrio/stitch/internal/backend"
-	"github.com/decentrio/stitch/internal/metrics"
-	"github.com/decentrio/stitch/internal/pool"
-	"github.com/decentrio/stitch/internal/types"
+	"github.com/InjectiveLabs/stitch/internal/backend"
+	"github.com/InjectiveLabs/stitch/internal/metrics"
+	"github.com/InjectiveLabs/stitch/internal/pool"
+	"github.com/InjectiveLabs/stitch/internal/types"
 )
 
 // GRPCProber checks gRPC connectivity to every backend that has a grpc

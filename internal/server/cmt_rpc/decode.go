@@ -11,7 +11,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/decentrio/stitch/internal/types"
+	"github.com/InjectiveLabs/stitch/internal/types"
 )
 
 // decoded captures everything we learn from inspecting a CometBFT RPC

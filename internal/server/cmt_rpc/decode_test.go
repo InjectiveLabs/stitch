@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/decentrio/stitch/internal/types"
+	"github.com/InjectiveLabs/stitch/internal/types"
 )
 
 func TestDecodeURIBlockHeight(t *testing.T) {

@@ -4,7 +4,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/decentrio/stitch/internal/config"
+	"github.com/InjectiveLabs/stitch/internal/config"
 )
 
 // The starter config written by `stitch init` must always pass

@@ -15,12 +15,12 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
-	"github.com/decentrio/stitch/internal/backend"
-	"github.com/decentrio/stitch/internal/circuit"
-	"github.com/decentrio/stitch/internal/health"
-	"github.com/decentrio/stitch/internal/metrics"
-	"github.com/decentrio/stitch/internal/selector"
-	"github.com/decentrio/stitch/internal/types"
+	"github.com/InjectiveLabs/stitch/internal/backend"
+	"github.com/InjectiveLabs/stitch/internal/circuit"
+	"github.com/InjectiveLabs/stitch/internal/health"
+	"github.com/InjectiveLabs/stitch/internal/metrics"
+	"github.com/InjectiveLabs/stitch/internal/selector"
+	"github.com/InjectiveLabs/stitch/internal/types"
 )
 
 // gatedInjMock is a programmable /injstream-ws upstream for lifecycle

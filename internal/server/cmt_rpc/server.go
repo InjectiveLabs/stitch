@@ -11,12 +11,12 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/decentrio/stitch/internal/cache"
-	"github.com/decentrio/stitch/internal/forwarder"
-	"github.com/decentrio/stitch/internal/log"
-	"github.com/decentrio/stitch/internal/runtime"
-	"github.com/decentrio/stitch/internal/server"
-	"github.com/decentrio/stitch/internal/types"
+	"github.com/InjectiveLabs/stitch/internal/cache"
+	"github.com/InjectiveLabs/stitch/internal/forwarder"
+	"github.com/InjectiveLabs/stitch/internal/log"
+	"github.com/InjectiveLabs/stitch/internal/runtime"
+	"github.com/InjectiveLabs/stitch/internal/server"
+	"github.com/InjectiveLabs/stitch/internal/types"
 )
 
 // Server is the CometBFT RPC listener.

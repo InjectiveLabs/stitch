@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 
-	"github.com/decentrio/stitch/internal/types"
+	"github.com/InjectiveLabs/stitch/internal/types"
 )
 
 // jsonRPCRequest is the wire shape of one JSON-RPC v2 request.

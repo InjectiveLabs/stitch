@@ -9,8 +9,8 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
-	"github.com/decentrio/stitch/internal/metrics"
-	"github.com/decentrio/stitch/internal/types"
+	"github.com/InjectiveLabs/stitch/internal/metrics"
+	"github.com/InjectiveLabs/stitch/internal/types"
 )
 
 // Snapshot is a point-in-time read of one backend's health for one protocol.

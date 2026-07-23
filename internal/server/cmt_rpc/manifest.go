@@ -1,6 +1,6 @@
 package cmt_rpc
 
-import "github.com/decentrio/stitch/internal/types"
+import "github.com/InjectiveLabs/stitch/internal/types"
 
 // MethodSpec describes how one CometBFT RPC method is routed. Phase 1 keeps
 // the manifest as in-code data; later phases may load it from YAML.

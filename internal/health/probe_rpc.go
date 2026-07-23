@@ -9,10 +9,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/decentrio/stitch/internal/backend"
-	"github.com/decentrio/stitch/internal/log"
-	"github.com/decentrio/stitch/internal/metrics"
-	"github.com/decentrio/stitch/internal/types"
+	"github.com/InjectiveLabs/stitch/internal/backend"
+	"github.com/InjectiveLabs/stitch/internal/log"
+	"github.com/InjectiveLabs/stitch/internal/metrics"
+	"github.com/InjectiveLabs/stitch/internal/types"
 )
 
 // RPCProber probes CometBFT /status to learn each backend's latest height

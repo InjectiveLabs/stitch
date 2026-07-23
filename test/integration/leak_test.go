@@ -12,12 +12,12 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"github.com/decentrio/stitch/internal/backend"
-	"github.com/decentrio/stitch/internal/circuit"
-	"github.com/decentrio/stitch/internal/health"
-	"github.com/decentrio/stitch/internal/selector"
-	"github.com/decentrio/stitch/internal/server/eth_ws"
-	"github.com/decentrio/stitch/internal/types"
+	"github.com/InjectiveLabs/stitch/internal/backend"
+	"github.com/InjectiveLabs/stitch/internal/circuit"
+	"github.com/InjectiveLabs/stitch/internal/health"
+	"github.com/InjectiveLabs/stitch/internal/selector"
+	"github.com/InjectiveLabs/stitch/internal/server/eth_ws"
+	"github.com/InjectiveLabs/stitch/internal/types"
 )
 
 // TestNoGoroutineLeakAcrossSetupTeardown drives a setup → handful of

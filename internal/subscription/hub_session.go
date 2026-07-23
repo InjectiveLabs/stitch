@@ -10,8 +10,8 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"github.com/decentrio/stitch/internal/metrics"
-	"github.com/decentrio/stitch/internal/types"
+	"github.com/InjectiveLabs/stitch/internal/metrics"
+	"github.com/InjectiveLabs/stitch/internal/types"
 )
 
 // HubSession serves one /injstream-ws client in multicast mode: subscribe

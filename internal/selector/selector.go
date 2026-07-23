@@ -6,10 +6,10 @@ package selector
 import (
 	"sort"
 
-	"github.com/decentrio/stitch/internal/backend"
-	"github.com/decentrio/stitch/internal/circuit"
-	"github.com/decentrio/stitch/internal/health"
-	"github.com/decentrio/stitch/internal/types"
+	"github.com/InjectiveLabs/stitch/internal/backend"
+	"github.com/InjectiveLabs/stitch/internal/circuit"
+	"github.com/InjectiveLabs/stitch/internal/health"
+	"github.com/InjectiveLabs/stitch/internal/types"
 )
 
 // Selector returns ordered candidates for a route key. Length 0 means no

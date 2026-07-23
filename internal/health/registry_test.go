@@ -3,8 +3,8 @@ package health
 import (
 	"testing"
 
-	"github.com/decentrio/stitch/internal/metrics"
-	"github.com/decentrio/stitch/internal/types"
+	"github.com/InjectiveLabs/stitch/internal/metrics"
+	"github.com/InjectiveLabs/stitch/internal/types"
 )
 
 func TestPruneRemovesInactiveBackend(t *testing.T) {

@@ -15,15 +15,15 @@ import (
 	"testing"
 	"time"
 
-	"github.com/decentrio/stitch/internal/backend"
-	"github.com/decentrio/stitch/internal/circuit"
-	"github.com/decentrio/stitch/internal/forwarder"
-	"github.com/decentrio/stitch/internal/health"
-	"github.com/decentrio/stitch/internal/pool"
-	"github.com/decentrio/stitch/internal/selector"
-	"github.com/decentrio/stitch/internal/server/cmt_rpc"
-	"github.com/decentrio/stitch/internal/server/cosmos_rest"
-	"github.com/decentrio/stitch/internal/types"
+	"github.com/InjectiveLabs/stitch/internal/backend"
+	"github.com/InjectiveLabs/stitch/internal/circuit"
+	"github.com/InjectiveLabs/stitch/internal/forwarder"
+	"github.com/InjectiveLabs/stitch/internal/health"
+	"github.com/InjectiveLabs/stitch/internal/pool"
+	"github.com/InjectiveLabs/stitch/internal/selector"
+	"github.com/InjectiveLabs/stitch/internal/server/cmt_rpc"
+	"github.com/InjectiveLabs/stitch/internal/server/cosmos_rest"
+	"github.com/InjectiveLabs/stitch/internal/types"
 )
 
 type upstream struct {

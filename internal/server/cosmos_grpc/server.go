@@ -25,7 +25,7 @@ import (
 
 	"google.golang.org/grpc"
 
-	"github.com/decentrio/stitch/internal/log"
+	"github.com/InjectiveLabs/stitch/internal/log"
 )
 
 // Server is the Cosmos gRPC listener.

@@ -12,9 +12,9 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
-	"github.com/decentrio/stitch/internal/backend"
-	"github.com/decentrio/stitch/internal/metrics"
-	"github.com/decentrio/stitch/internal/types"
+	"github.com/InjectiveLabs/stitch/internal/backend"
+	"github.com/InjectiveLabs/stitch/internal/metrics"
+	"github.com/InjectiveLabs/stitch/internal/types"
 )
 
 // wsPipe returns the two ends of a live WebSocket connection: the

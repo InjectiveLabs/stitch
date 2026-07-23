@@ -15,12 +15,12 @@ import (
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/metadata"
 
-	"github.com/decentrio/stitch/internal/backend"
-	"github.com/decentrio/stitch/internal/circuit"
-	healthreg "github.com/decentrio/stitch/internal/health"
-	"github.com/decentrio/stitch/internal/pool"
-	"github.com/decentrio/stitch/internal/selector"
-	"github.com/decentrio/stitch/internal/types"
+	"github.com/InjectiveLabs/stitch/internal/backend"
+	"github.com/InjectiveLabs/stitch/internal/circuit"
+	healthreg "github.com/InjectiveLabs/stitch/internal/health"
+	"github.com/InjectiveLabs/stitch/internal/pool"
+	"github.com/InjectiveLabs/stitch/internal/selector"
+	"github.com/InjectiveLabs/stitch/internal/types"
 )
 
 // mockBackend wraps grpc.health.v1.Health on a real listener with hit

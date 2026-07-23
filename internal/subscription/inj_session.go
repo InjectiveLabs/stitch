@@ -11,10 +11,10 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"github.com/decentrio/stitch/internal/metrics"
-	"github.com/decentrio/stitch/internal/selector"
-	"github.com/decentrio/stitch/internal/types"
-	"github.com/decentrio/stitch/internal/wsurl"
+	"github.com/InjectiveLabs/stitch/internal/metrics"
+	"github.com/InjectiveLabs/stitch/internal/selector"
+	"github.com/InjectiveLabs/stitch/internal/types"
+	"github.com/InjectiveLabs/stitch/internal/wsurl"
 )
 
 // InjSession is one /injstream-ws client connection paired with one

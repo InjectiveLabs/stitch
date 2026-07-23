@@ -10,8 +10,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/decentrio/stitch/internal/log"
-	"github.com/decentrio/stitch/internal/metrics"
+	"github.com/InjectiveLabs/stitch/internal/log"
+	"github.com/InjectiveLabs/stitch/internal/metrics"
 )
 
 // Server hosts the admin/observability endpoints.

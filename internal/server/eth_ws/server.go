@@ -23,12 +23,12 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"github.com/decentrio/stitch/internal/log"
-	"github.com/decentrio/stitch/internal/runtime"
-	"github.com/decentrio/stitch/internal/selector"
-	"github.com/decentrio/stitch/internal/server"
-	"github.com/decentrio/stitch/internal/subscription"
-	"github.com/decentrio/stitch/internal/types"
+	"github.com/InjectiveLabs/stitch/internal/log"
+	"github.com/InjectiveLabs/stitch/internal/runtime"
+	"github.com/InjectiveLabs/stitch/internal/selector"
+	"github.com/InjectiveLabs/stitch/internal/server"
+	"github.com/InjectiveLabs/stitch/internal/subscription"
+	"github.com/InjectiveLabs/stitch/internal/types"
 )
 
 // Server is the EVM WebSocket listener.

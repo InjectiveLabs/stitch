@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/decentrio/stitch/internal/backend"
-	"github.com/decentrio/stitch/internal/types"
+	"github.com/InjectiveLabs/stitch/internal/backend"
+	"github.com/InjectiveLabs/stitch/internal/types"
 )
 
 // cometStatusMock emulates a CometBFT /status endpoint returning a fixed

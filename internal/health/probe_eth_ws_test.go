@@ -14,8 +14,8 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"github.com/decentrio/stitch/internal/backend"
-	"github.com/decentrio/stitch/internal/types"
+	"github.com/InjectiveLabs/stitch/internal/backend"
+	"github.com/InjectiveLabs/stitch/internal/types"
 )
 
 // wsBackendMock emulates an eth_ws backend. After ack-ing eth_subscribe,

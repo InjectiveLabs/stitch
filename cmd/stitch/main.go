@@ -1,7 +1,7 @@
 package main
 
 import (
-	"github.com/decentrio/stitch/internal/cmd"
+	"github.com/InjectiveLabs/stitch/internal/cmd"
 )
 
 func main() {

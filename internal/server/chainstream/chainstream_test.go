@@ -15,13 +15,13 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 
-	"github.com/decentrio/stitch/internal/backend"
-	"github.com/decentrio/stitch/internal/circuit"
-	healthreg "github.com/decentrio/stitch/internal/health"
-	"github.com/decentrio/stitch/internal/pool"
-	"github.com/decentrio/stitch/internal/selector"
-	"github.com/decentrio/stitch/internal/subscription"
-	"github.com/decentrio/stitch/internal/types"
+	"github.com/InjectiveLabs/stitch/internal/backend"
+	"github.com/InjectiveLabs/stitch/internal/circuit"
+	healthreg "github.com/InjectiveLabs/stitch/internal/health"
+	"github.com/InjectiveLabs/stitch/internal/pool"
+	"github.com/InjectiveLabs/stitch/internal/selector"
+	"github.com/InjectiveLabs/stitch/internal/subscription"
+	"github.com/InjectiveLabs/stitch/internal/types"
 )
 
 const streamMethod = "/injective.stream.v2.Stream/StreamV2"

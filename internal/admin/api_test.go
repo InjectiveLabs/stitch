@@ -9,11 +9,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/decentrio/stitch/internal/backend"
-	"github.com/decentrio/stitch/internal/cache"
-	"github.com/decentrio/stitch/internal/circuit"
-	"github.com/decentrio/stitch/internal/health"
-	"github.com/decentrio/stitch/internal/types"
+	"github.com/InjectiveLabs/stitch/internal/backend"
+	"github.com/InjectiveLabs/stitch/internal/cache"
+	"github.com/InjectiveLabs/stitch/internal/circuit"
+	"github.com/InjectiveLabs/stitch/internal/health"
+	"github.com/InjectiveLabs/stitch/internal/types"
 )
 
 func makeRig(t *testing.T) (*Server, *httptest.Server, *backend.Registry, *health.Registry, *circuit.Manager, *cache.HashIndex, *cache.ResponseCache) {

@@ -8,7 +8,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
-	"github.com/decentrio/stitch/internal/metrics"
+	"github.com/InjectiveLabs/stitch/internal/metrics"
 )
 
 func TestResponseCacheBasic(t *testing.T) {

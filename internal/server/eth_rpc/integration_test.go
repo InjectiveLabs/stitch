@@ -11,13 +11,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/decentrio/stitch/internal/backend"
-	"github.com/decentrio/stitch/internal/circuit"
-	"github.com/decentrio/stitch/internal/forwarder"
-	healthreg "github.com/decentrio/stitch/internal/health"
-	"github.com/decentrio/stitch/internal/pool"
-	"github.com/decentrio/stitch/internal/selector"
-	"github.com/decentrio/stitch/internal/types"
+	"github.com/InjectiveLabs/stitch/internal/backend"
+	"github.com/InjectiveLabs/stitch/internal/circuit"
+	"github.com/InjectiveLabs/stitch/internal/forwarder"
+	healthreg "github.com/InjectiveLabs/stitch/internal/health"
+	"github.com/InjectiveLabs/stitch/internal/pool"
+	"github.com/InjectiveLabs/stitch/internal/selector"
+	"github.com/InjectiveLabs/stitch/internal/types"
 )
 
 // Mock EVM JSON-RPC backend. Echoes the method name in the result so the

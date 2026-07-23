@@ -104,7 +104,7 @@ where each piece is independently testable and replaceable.
 ## Quick start
 
 ```bash
-git clone https://github.com/decentrio/stitch
+git clone https://github.com/InjectiveLabs/stitch
 cd stitch
 make build
 
@@ -130,7 +130,7 @@ curl -s http://127.0.0.1:9091/metrics | grep stitch_
 Requires Go 1.25+.
 
 ```bash
-git clone https://github.com/decentrio/stitch
+git clone https://github.com/InjectiveLabs/stitch
 cd stitch
 make build         # produces ./build/stitch
 make install       # or: go install into $GOPATH/bin

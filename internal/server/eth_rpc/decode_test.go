@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/decentrio/stitch/internal/types"
+	"github.com/InjectiveLabs/stitch/internal/types"
 )
 
 func TestDecodeRoutesEthGetBalance(t *testing.T) {

@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/decentrio/stitch/internal/cache"
+	"github.com/InjectiveLabs/stitch/internal/cache"
 )
 
 // TestRespCacheServesFromCacheOnFinalizedHeight: a cacheable, height-keyed

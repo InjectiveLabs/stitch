@@ -1,4 +1,4 @@
-module github.com/decentrio/stitch
+module github.com/InjectiveLabs/stitch
 
 go 1.25.0
 

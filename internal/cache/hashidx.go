@@ -11,7 +11,7 @@ import (
 	"container/list"
 	"sync"
 
-	"github.com/decentrio/stitch/internal/metrics"
+	"github.com/InjectiveLabs/stitch/internal/metrics"
 )
 
 // HashIndex is a thread-safe LRU mapping hash strings to block heights.

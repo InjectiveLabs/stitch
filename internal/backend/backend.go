@@ -6,8 +6,8 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/decentrio/stitch/internal/config"
-	"github.com/decentrio/stitch/internal/types"
+	"github.com/InjectiveLabs/stitch/internal/config"
+	"github.com/InjectiveLabs/stitch/internal/types"
 )
 
 // Backend is one upstream node, including which heights it serves and which

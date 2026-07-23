@@ -2,9 +2,9 @@ VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 COMMIT  := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 DATE    := $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 
-LDFLAGS := -X 'github.com/decentrio/stitch/internal/cmd.version=$(VERSION)' \
-           -X 'github.com/decentrio/stitch/internal/cmd.commit=$(COMMIT)' \
-           -X 'github.com/decentrio/stitch/internal/cmd.date=$(DATE)' \
+LDFLAGS := -X 'github.com/InjectiveLabs/stitch/internal/cmd.version=$(VERSION)' \
+           -X 'github.com/InjectiveLabs/stitch/internal/cmd.commit=$(COMMIT)' \
+           -X 'github.com/InjectiveLabs/stitch/internal/cmd.date=$(DATE)' \
            -w -s
 
 .PHONY: build install test test-race lint vet tidy clean run

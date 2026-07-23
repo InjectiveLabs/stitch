@@ -12,7 +12,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/keepalive"
 
-	"github.com/decentrio/stitch/internal/log"
+	"github.com/InjectiveLabs/stitch/internal/log"
 )
 
 // GRPCPool maintains one *grpc.ClientConn per backend, with idle eviction —

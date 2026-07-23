@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/decentrio/stitch/internal/backend"
-	"github.com/decentrio/stitch/internal/types"
+	"github.com/InjectiveLabs/stitch/internal/backend"
+	"github.com/InjectiveLabs/stitch/internal/types"
 )
 
 // RESTProber probes Cosmos REST `/cosmos/base/tendermint/v1beta1/blocks/latest`
