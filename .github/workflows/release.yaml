@@ -1,0 +1,52 @@
+name: Release docker images
+
+on:
+  push:
+    tags:
+      - v**
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  ECR_REPO: public.ecr.aws/l9h3g6c6/stitch
+  AWS_REGION: us-east-1
+
+jobs:
+  amd64-release:
+    runs-on: blacksmith-32vcpu-ubuntu-2404
+    timeout-minutes: 90
+    steps:
+      - name: Checkout stitch
+        uses: actions/checkout@master
+
+      - name: Set up Docker Buildx
+        uses: useblacksmith/setup-docker-builder@v1
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: arn:aws:iam::981432137740:role/stitch
+          aws-region: ${{ env.AWS_REGION }}
+          audience: sts.amazonaws.com
+
+      - name: Login to Amazon ECR Public
+        uses: aws-actions/amazon-ecr-login@v2
+        with:
+          registry-type: public
+
+      - name: Build
+        uses: useblacksmith/build-push-action@v2
+        with:
+          context: .
+          tags: ${{ env.ECR_REPO }}:${{ github.ref_name }}
+          platforms: linux/amd64
+          push: true
+          build-args: |
+            VERSION=${{ github.ref_name }}
+            COMMIT=${{ github.sha }}
