@@ -104,3 +104,60 @@ jobs:
             # graceful shutdown after timeout = 0 or 124; anything else is a real failure
             [ "$rc" = "124" ] || [ "$rc" = "0" ] || [ -z "$rc" ] || { echo "FAIL: $f exited $rc"; exit 1; }
           done
+
+  helm-chart:
+    name: Helm chart
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.13.1
+      - name: lint
+        run: >-
+          helm lint ./helm/stitch
+          --values ./helm/stitch/examples/values.internal.yaml
+      - name: render internal-only resources
+        run: |
+          helm template stitch ./helm/stitch \
+            --namespace injective \
+            --values ./helm/stitch/examples/values.internal.yaml \
+            > /tmp/stitch-internal.yaml
+          ! grep -Eq '^kind: (Ingress|Gateway|HTTPRoute|GRPCRoute)$' /tmp/stitch-internal.yaml
+          grep -q '^  type: ClusterIP$' /tmp/stitch-internal.yaml
+          grep -q '^  replicas: 2$' /tmp/stitch-internal.yaml
+      - name: render structured configuration with custom ports
+        run: |
+          helm lint ./helm/stitch \
+            --values ./helm/stitch/examples/values.custom-ports.yaml
+          helm template stitch ./helm/stitch \
+            --namespace injective \
+            --values ./helm/stitch/examples/values.custom-ports.yaml \
+            > /tmp/stitch-custom-ports.yaml
+          grep -q '^      port: 30000$' /tmp/stitch-custom-ports.yaml
+          grep -q '^              containerPort: 30000$' /tmp/stitch-custom-ports.yaml
+          grep -q '^      port: 30099$' /tmp/stitch-custom-ports.yaml
+          ! grep -q '^      name: eth-rpc$' /tmp/stitch-custom-ports.yaml
+          ! grep -q '^      name: eth-ws$' /tmp/stitch-custom-ports.yaml
+      - name: render Gateway API resources
+        run: |
+          helm template stitch ./helm/stitch \
+            --namespace injective \
+            --api-versions gateway.networking.k8s.io/v1/HTTPRoute \
+            --values ./helm/stitch/examples/values.internal.yaml \
+            --values ./helm/stitch/examples/values.gateway.yaml \
+            > /tmp/stitch-gateway.yaml
+          test "$(grep -c '^kind: HTTPRoute$' /tmp/stitch-gateway.yaml)" -eq 2
+          ! grep -q '^kind: GRPCRoute$' /tmp/stitch-gateway.yaml
+          grep -q '^  name: stitch-grpc$' /tmp/stitch-gateway.yaml
+          grep -q '^  name: stitch-chainstream$' /tmp/stitch-gateway.yaml
+          ! grep -q '^kind: Ingress$' /tmp/stitch-gateway.yaml
+      - name: verify naming override
+        run: |
+          helm template stitch ./helm/stitch \
+            --namespace injective \
+            --values ./helm/stitch/examples/values.internal.yaml \
+            --set fullnameOverride=stitch-testnet \
+            > /tmp/stitch-override.yaml
+          grep -q '^  name: stitch-testnet-service$' /tmp/stitch-override.yaml
+          grep -q '^  name: stitch-testnet-config$' /tmp/stitch-override.yaml

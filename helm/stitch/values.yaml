@@ -1,0 +1,198 @@
+# Resource names use "stitch" as their base by default. Set this when more
+# than one Stitch release must run in the same namespace.
+fullnameOverride: ""
+
+replicaCount: 2
+
+image:
+  repository: public.ecr.aws/l9h3g6c6/stitch
+  # An empty tag uses Chart.appVersion.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+# By default the chart renders the top-level listen, log, policies, backends,
+# and auth values below as Stitch's config.yaml. Raw content and existing
+# ConfigMap/Secret sources remain available as escape hatches.
+config:
+  # Full Stitch YAML. --set-file is convenient for existing configurations:
+  #   --set-file config.content=./config.yaml
+  content: ""
+  existingConfigMap: ""
+  existingSecret: ""
+  key: config.yaml
+
+# Stitch application configuration. Listener ports are also used for the
+# Deployment and Service, so there is no separate port list to keep in sync.
+# An empty or omitted listener disables it. See examples/values.internal.yaml.
+listen: {}
+
+log:
+  level: info
+  format: json
+
+policies:
+  failover:
+    max_attempts: 3
+    per_attempt_timeout: 5s
+  hedging:
+    enabled: false
+  circuit:
+    error_threshold: 0.5
+    min_requests: 20
+    open_duration: 30s
+  cache:
+    enabled: false
+    confirmation_depth: 100
+  health:
+    probe_interval: 5s
+    max_lag_blocks: 50
+  subscriptions:
+    multicast: false
+    slow_consumer: drop
+    replay_timeout: 30s
+
+# At least one backend is required when using the structured values above.
+backends: []
+
+# Reserved for Stitch auth configuration.
+auth: {}
+
+# Advanced escape hatch for config.content or existingConfigMap/existingSecret:
+# when non-empty, this map replaces ports derived from the top-level listen
+# values. Keys are Kubernetes port names such as eth-rpc and inj-ws.
+listeners: {}
+
+service:
+  annotations: {}
+  labels: {}
+  sessionAffinity: None
+
+extraEnv: []
+# - name: ARCHIVE_RPC_URL
+#   valueFrom:
+#     secretKeyRef:
+#       name: stitch-upstreams
+#       key: archive-rpc-url
+
+extraEnvFrom: []
+# - secretRef:
+#     name: stitch-upstreams
+
+extraVolumes: []
+extraVolumeMounts: []
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  # Set a memory limit with care when policies.cache.l1_size_mb is enabled.
+  limits: {}
+
+podAnnotations: {}
+podLabels: {}
+commonLabels: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+automountServiceAccountToken: false
+
+deploymentStrategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxUnavailable: 0
+    maxSurge: 1
+
+# Stitch receives SIGTERM and drains its listeners for this duration.
+shutdownGracePeriod: 20s
+terminationGracePeriodSeconds: 30
+
+probes:
+  startup:
+    enabled: true
+    path: /healthz
+    periodSeconds: 2
+    timeoutSeconds: 2
+    failureThreshold: 30
+  readiness:
+    enabled: true
+    path: /readyz
+    initialDelaySeconds: 2
+    periodSeconds: 5
+    timeoutSeconds: 2
+    failureThreshold: 3
+  liveness:
+    enabled: true
+    path: /healthz
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    timeoutSeconds: 2
+    failureThreshold: 3
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+# Prefer placing replicas on different nodes while still allowing scheduling
+# onto one node in small clusters.
+podAntiAffinity:
+  enabled: true
+  topologyKey: kubernetes.io/hostname
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# Gateway API exposure is off by default. The chart creates Routes only and
+# expects the referenced Gateway to exist already.
+gateway:
+  enabled: false
+  parentRefs: []
+  # - name: shared-gateway
+  #   namespace: gateway-system
+  #   sectionName: https
+
+  httpRoutes: []
+  # - name: eth-rpc
+  #   targetPort: eth-rpc
+  #   hostnames:
+  #     - rpc.example.com
+  #   matches:
+  #     - path:
+  #         type: PathPrefix
+  #         value: /
+  #   parentRefs: [] # optional; overrides gateway.parentRefs when non-empty
+  #   annotations: {}
+  #   labels: {}
+  #
+  # Native gRPC listeners can also use HTTPRoute when an HTTPS Gateway
+  # listener does not admit GRPCRoute. Disable timeouts for streaming:
+  # - name: chainstream
+  #   targetPort: chainstream
+  #   hostnames:
+  #     - stream.example.com
+  #   timeouts:
+  #     request: 0s
+  #     backendRequest: 0s
+
+  # Optional alternative for Gateway listeners that explicitly admit
+  # GRPCRoute resources.
+  grpcRoutes: []
+  # - name: grpc
+  #   targetPort: grpc
+  #   hostnames:
+  #     - grpc.example.com
+  #   parentRefs: [] # optional; overrides gateway.parentRefs when non-empty
+  #   annotations: {}
+  #   labels: {}

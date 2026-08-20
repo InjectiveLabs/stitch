@@ -1,0 +1,20 @@
+# Minimal internal-only deployment. Replace this URL with a real upstream or
+# source it from an existing Secret via extraEnvFrom.
+extraEnv:
+  - name: ARCHIVE_RPC_URL
+    value: http://archive.default.svc.cluster.local:26657
+
+listen:
+  rpc:         { addr: "0.0.0.0:5001" }
+  grpc:        { addr: "0.0.0.0:5002" }
+  api:         { addr: "0.0.0.0:5003" }
+  chainstream: { addr: "0.0.0.0:5007" }
+  inj_ws:      { addr: "0.0.0.0:5008" }
+  admin:       { addr: "0.0.0.0:9091" }
+
+backends:
+  - name: archive
+    coverage: { kind: archive }
+    weight: 100
+    endpoints:
+      rpc: ${ARCHIVE_RPC_URL}

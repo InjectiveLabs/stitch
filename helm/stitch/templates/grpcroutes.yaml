@@ -1,0 +1,43 @@
+{{- if and .Values.gateway.enabled (gt (len .Values.gateway.grpcRoutes) 0) }}
+{{- if not (.Capabilities.APIVersions.Has "gateway.networking.k8s.io/v1/GRPCRoute") }}
+{{- fail "gateway gRPC routes require gateway.networking.k8s.io/v1/GRPCRoute" }}
+{{- end }}
+{{- $listeners := include "stitch.effectiveListeners" . | fromYaml }}
+{{- range $route := .Values.gateway.grpcRoutes }}
+{{- $listener := index $listeners $route.targetPort }}
+{{- $parentRefs := default $.Values.gateway.parentRefs $route.parentRefs }}
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: GRPCRoute
+metadata:
+  name: {{ include "stitch.routeName" (dict "root" $ "name" $route.name) }}
+  labels:
+    {{- include "stitch.labels" $ | nindent 4 }}
+    {{- with $route.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- with $route.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  parentRefs:
+    {{- toYaml $parentRefs | nindent 4 }}
+  {{- with $route.hostnames }}
+  hostnames:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  rules:
+    - {{- with $route.matches }}
+      matches:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $route.filters }}
+      filters:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      backendRefs:
+        - name: {{ include "stitch.serviceName" $ }}
+          port: {{ $listener.port }}
+{{- end }}
+{{- end }}

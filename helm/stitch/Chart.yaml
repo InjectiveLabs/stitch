@@ -1,0 +1,15 @@
+apiVersion: v2
+name: stitch
+description: A Helm chart for the Stitch height-aware multi-protocol gateway
+type: application
+version: 0.1.0
+appVersion: "v0.1.0"
+kubeVersion: ">=1.25.0-0"
+home: https://github.com/InjectiveLabs/stitch
+sources:
+  - https://github.com/InjectiveLabs/stitch
+keywords:
+  - cosmos
+  - gateway
+  - injective
+  - rpc

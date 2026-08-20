@@ -1,0 +1,37 @@
+# Apply this after values.internal.yaml to expose selected listeners through an
+# existing Gateway. TLS and DNS are owned by that Gateway and its operators.
+gateway:
+  enabled: true
+  parentRefs:
+    - name: shared-gateway
+      namespace: gateway-system
+      sectionName: https
+
+  httpRoutes:
+    - name: grpc
+      targetPort: grpc
+      hostnames:
+        - grpc.example.com
+      matches:
+        - path:
+            type: PathPrefix
+            value: /
+      timeouts:
+        request: 0s
+        backendRequest: 0s
+
+    - name: chainstream
+      targetPort: chainstream
+      hostnames:
+        - chainstream.example.com
+      matches:
+        - path:
+            type: PathPrefix
+            value: /
+      timeouts:
+        request: 0s
+        backendRequest: 0s
+
+  # Use grpcRoutes instead only when the selected Gateway listener admits
+  # gateway.networking.k8s.io/GRPCRoute.
+  grpcRoutes: []

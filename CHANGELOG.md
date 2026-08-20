@@ -9,6 +9,13 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Added
 
+- A Helm chart under `helm/stitch` deploys multiple Stitch replicas behind an
+  internal multi-port `ClusterIP` Service, with optional Gateway API
+  `HTTPRoute` and `GRPCRoute` exposure and no Ingress resources. Stitch's
+  `listen`, `log`, `policies`, `backends`, and `auth` configuration can be
+  supplied directly as structured Helm values, with workload and Service
+  ports derived from `listen`. Native gRPC and ChainStream listeners can use
+  HTTPRoute for HTTPS Gateways that do not admit GRPCRoute.
 - `/injstream-ws` multicast is now actually wired, behind
   `policies.subscriptions.multicast` (default **false**). It was advertised
   in the README and parsed from config, but the multicast hub had zero

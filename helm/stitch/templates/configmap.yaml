@@ -1,0 +1,25 @@
+{{- include "stitch.validate" . -}}
+{{- if and (not .Values.config.existingConfigMap) (not .Values.config.existingSecret) }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "stitch.configName" . }}
+  labels:
+    {{- include "stitch.labels" . | nindent 4 }}
+data:
+  {{ .Values.config.key }}: |
+    {{- if .Values.config.content }}
+    {{- .Values.config.content | nindent 4 }}
+    {{- else }}
+    {{- $stitchConfig := dict
+      "listen" .Values.listen
+      "log" .Values.log
+      "policies" .Values.policies
+      "backends" .Values.backends
+    }}
+    {{- if .Values.auth }}
+      {{- $_ := set $stitchConfig "auth" .Values.auth }}
+    {{- end }}
+    {{- toYaml $stitchConfig | nindent 4 }}
+    {{- end }}
+{{- end }}

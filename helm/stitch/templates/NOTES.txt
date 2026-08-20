@@ -1,0 +1,18 @@
+Stitch has been installed as {{ include "stitch.fullname" . }} with {{ .Values.replicaCount }} replica(s).
+
+Internal clients can use the ClusterIP Service:
+  {{ include "stitch.serviceName" . }}.{{ .Release.Namespace }}.svc.cluster.local
+
+{{- if .Values.gateway.enabled }}
+
+Gateway API routes:
+{{- range .Values.gateway.httpRoutes }}
+  HTTPRoute  {{ include "stitch.routeName" (dict "root" $ "name" .name) }}
+{{- end }}
+{{- range .Values.gateway.grpcRoutes }}
+  GRPCRoute  {{ include "stitch.routeName" (dict "root" $ "name" .name) }}
+{{- end }}
+{{- else }}
+
+Gateway API exposure is disabled; Stitch is reachable only inside the cluster.
+{{- end }}

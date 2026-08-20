@@ -1,0 +1,265 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "required": ["config", "listen", "log", "policies", "backends", "auth", "listeners"],
+  "properties": {
+    "fullnameOverride": {
+      "type": "string",
+      "maxLength": 63,
+      "pattern": "^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
+    },
+    "replicaCount": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "image": {
+      "type": "object",
+      "required": ["repository", "tag", "pullPolicy"],
+      "properties": {
+        "repository": {"type": "string", "minLength": 1},
+        "tag": {"type": "string"},
+        "pullPolicy": {
+          "type": "string",
+          "enum": ["Always", "IfNotPresent", "Never"]
+        }
+      }
+    },
+    "config": {
+      "type": "object",
+      "required": ["content", "existingConfigMap", "existingSecret", "key"],
+      "properties": {
+        "content": {"type": "string"},
+        "existingConfigMap": {
+          "type": "string",
+          "pattern": "^$|^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$"
+        },
+        "existingSecret": {
+          "type": "string",
+          "pattern": "^$|^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$"
+        },
+        "key": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._-]+$"
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "content": {"maxLength": 0},
+            "existingConfigMap": {"maxLength": 0},
+            "existingSecret": {"maxLength": 0}
+          }
+        },
+        {
+          "properties": {
+            "content": {"minLength": 1},
+            "existingConfigMap": {"maxLength": 0},
+            "existingSecret": {"maxLength": 0}
+          }
+        },
+        {
+          "properties": {
+            "content": {"maxLength": 0},
+            "existingConfigMap": {"minLength": 1},
+            "existingSecret": {"maxLength": 0}
+          }
+        },
+        {
+          "properties": {
+            "content": {"maxLength": 0},
+            "existingConfigMap": {"maxLength": 0},
+            "existingSecret": {"minLength": 1}
+          }
+        }
+      ]
+    },
+    "listen": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "rpc": {"$ref": "#/definitions/stitchListener"},
+        "grpc": {"$ref": "#/definitions/stitchListener"},
+        "api": {"$ref": "#/definitions/stitchListener"},
+        "eth_rpc": {"$ref": "#/definitions/stitchListener"},
+        "eth_ws": {"$ref": "#/definitions/stitchListener"},
+        "chainstream": {"$ref": "#/definitions/stitchListener"},
+        "inj_ws": {"$ref": "#/definitions/stitchListener"},
+        "admin": {"$ref": "#/definitions/stitchListener"}
+      }
+    },
+    "log": {
+      "type": "object"
+    },
+    "policies": {
+      "type": "object"
+    },
+    "backends": {
+      "type": "array",
+      "items": {"type": "object"}
+    },
+    "auth": {
+      "type": "object"
+    },
+    "listeners": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "rpc": {"$ref": "#/definitions/listener"},
+        "grpc": {"$ref": "#/definitions/listener"},
+        "api": {"$ref": "#/definitions/listener"},
+        "eth-rpc": {"$ref": "#/definitions/listener"},
+        "eth-ws": {"$ref": "#/definitions/listener"},
+        "chainstream": {"$ref": "#/definitions/listener"},
+        "inj-ws": {"$ref": "#/definitions/listener"},
+        "admin": {"$ref": "#/definitions/listener"}
+      }
+    },
+    "shutdownGracePeriod": {
+      "type": "string",
+      "pattern": "^[0-9]+(ns|us|µs|ms|s|m|h)$"
+    },
+    "terminationGracePeriodSeconds": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "gateway": {
+      "type": "object",
+      "required": ["enabled", "parentRefs", "httpRoutes", "grpcRoutes"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "parentRefs": {
+          "type": "array",
+          "items": {"$ref": "#/definitions/parentRef"}
+        },
+        "httpRoutes": {
+          "type": "array",
+          "items": {"$ref": "#/definitions/httpRoute"}
+        },
+        "grpcRoutes": {
+          "type": "array",
+          "items": {"$ref": "#/definitions/grpcRoute"}
+        }
+      }
+    }
+  },
+  "definitions": {
+    "stitchListener": {
+      "type": "object",
+      "required": ["addr"],
+      "properties": {
+        "addr": {"type": "string"},
+        "tls": {"type": "object"},
+        "comment": {"type": "string"}
+      },
+      "additionalProperties": false
+    },
+    "listener": {
+      "type": "object",
+      "required": ["enabled", "port", "appProtocol"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "appProtocol": {"type": "string", "minLength": 1}
+      }
+    },
+    "parentRef": {
+      "type": "object",
+      "required": ["name"],
+      "properties": {
+        "group": {"type": "string"},
+        "kind": {"type": "string"},
+        "namespace": {"type": "string"},
+        "name": {"type": "string", "minLength": 1},
+        "sectionName": {"type": "string"},
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        }
+      },
+      "additionalProperties": false
+    },
+    "routeBase": {
+      "type": "object",
+      "required": ["name", "targetPort"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 63,
+          "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
+        },
+        "targetPort": {"type": "string"},
+        "hostnames": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1}
+        },
+        "parentRefs": {
+          "type": "array",
+          "items": {"$ref": "#/definitions/parentRef"}
+        },
+        "matches": {
+          "type": "array",
+          "items": {"type": "object"}
+        },
+        "filters": {
+          "type": "array",
+          "items": {"type": "object"}
+        },
+        "annotations": {
+          "type": "object",
+          "additionalProperties": {"type": "string"}
+        },
+        "labels": {
+          "type": "object",
+          "additionalProperties": {"type": "string"}
+        }
+      }
+    },
+    "httpRoute": {
+      "allOf": [
+        {"$ref": "#/definitions/routeBase"},
+        {
+          "properties": {
+            "targetPort": {
+              "enum": [
+                "rpc",
+                "grpc",
+                "api",
+                "eth-rpc",
+                "eth-ws",
+                "chainstream",
+                "inj-ws"
+              ]
+            },
+            "timeouts": {
+              "type": "object",
+              "properties": {
+                "request": {"type": "string"},
+                "backendRequest": {"type": "string"}
+              },
+              "additionalProperties": false
+            }
+          }
+        }
+      ]
+    },
+    "grpcRoute": {
+      "allOf": [
+        {"$ref": "#/definitions/routeBase"},
+        {
+          "properties": {
+            "targetPort": {
+              "enum": ["grpc", "chainstream"]
+            }
+          }
+        }
+      ]
+    }
+  }
+}

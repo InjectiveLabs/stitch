@@ -149,6 +149,22 @@ docker run -d \
   stitch:latest start --config /etc/stitch/config.yaml
 ```
 
+### Kubernetes with Helm
+
+The chart deploys two replicas behind an internal `ClusterIP` Service by
+default. Optional Gateway API routes can expose selected HTTP, WebSocket, and
+gRPC listeners; the chart does not create Ingress resources.
+
+```bash
+helm upgrade --install stitch ./helm/stitch \
+  --namespace injective \
+  --create-namespace \
+  --values ./helm/stitch/examples/values.internal.yaml
+```
+
+See the [chart documentation](helm/stitch/README.md) for configuration sources,
+Gateway API examples, naming overrides, and production notes.
+
 ## Configuration
 
 The config is YAML. All keys use `snake_case`. Unknown keys are rejected at
