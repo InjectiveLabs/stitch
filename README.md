@@ -74,7 +74,9 @@ where each piece is independently testable and replaceable.
   - admin (`/healthz`, `/readyz`, `/metrics`, `/admin/*`)
 - **Height-aware routing** with overlapping-range coverage shapes (archive,
   bounded, open, pruned). Selector picks narrowest backend that covers the
-  request, sparing the archive for what actually needs it.
+  request, sparing the archive for what actually needs it. Cosmos gRPC
+  understands both `x-cosmos-block-height` metadata and supported request-body
+  height fields.
 - **Failover** — circuit breakers per `(backend, protocol)`; transport,
   5xx, dial-error retries; non-idempotent broadcasts skip retry by design.
 - **Subscription resume** — kill the upstream mid-stream and the client's
@@ -300,6 +302,33 @@ Selector ranks: shard-1 first (highest specificity), then archive. The
 forwarder tries shard-1; on success, return. On 5xx or transport error,
 tries archive; circuit-records the shard-1 failure. After enough failures
 the shard-1 circuit opens and selector skips it entirely until cooldown.
+
+#### Cosmos gRPC request heights
+
+For Cosmos gRPC methods that carry a local chain height in their protobuf
+request, stitch inspects the first request message before selecting a backend.
+This makes a normal `grpcurl -d` call height-aware without a separate header:
+
+```bash
+grpcurl \
+  -d '{"height":180102279}' \
+  stitch.example.com:443 \
+  cosmos.base.tendermint.v1beta1.Service.GetBlockByHeight
+```
+
+The embedded gRPC manifest covers `GetBlockByHeight`,
+`GetValidatorSetByHeight`, `ABCIQuery`, staking `HistoricalInfo`, and
+`GetBlockWithTxs`. It also covers the IBC fee queries whose `query_height`
+field explicitly selects the local block height: `IncentivizedPackets`,
+`IncentivizedPacket`, `IncentivizedPacketsForChannel`, and
+`FeeEnabledChannels`.
+
+A positive `x-cosmos-block-height` metadata value takes precedence over the
+body for compatibility. When only the body supplies the height, stitch adds
+the matching metadata on the upstream call so Cosmos BaseApp queries open the
+same historical store version. Unknown methods remain transparent and route
+as latest unless metadata is supplied; stitch deliberately does not guess from
+unrelated fields such as proof heights or range-filter heights.
 
 ### Subscription resume
 

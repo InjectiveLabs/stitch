@@ -4,14 +4,12 @@
 //
 // What this phase does:
 //   - Accepts any registered or unknown service.
-//   - Routes each RPC to a backend chosen by stitch (header-based height,
-//     broadcast detection, circuit gating, failover-by-redial).
+//   - Routes each RPC to a backend chosen by stitch (metadata or supported
+//     protobuf-body heights, broadcast detection, circuit gating,
+//     failover-by-redial).
 //   - Reuses pooled *grpc.ClientConn per backend with idle eviction.
 //
 // What is deferred:
-//   - Per-method routing from proto fields (e.g. GetBlockByHeight.height
-//     instead of the metadata header). Adds in phase 2b once we vendor the
-//     cosmos-sdk types.
 //   - gRPC-Web wrapping (small wrapper; phase 2b).
 //   - Streaming-RPC failover after partial response (the subscription hub
 //     in phase 5 covers this for ChainStream specifically).

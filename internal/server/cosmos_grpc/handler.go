@@ -3,9 +3,13 @@ package cosmos_grpc
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/mwitkow/grpc-proxy/proxy"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/metadata"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/emptypb"
 )
 
 // streamHandler wraps proxy.TransparentHandler so we can:
@@ -24,7 +28,29 @@ func streamHandler(dir *Director) grpc.StreamHandler {
 	return func(srv any, ss grpc.ServerStream) error {
 		slot := &atomicString{}
 		_, hadDeadline := ss.Context().Deadline()
-		wrapped := &slotStream{ServerStream: ss, ctx: context.WithValue(ss.Context(), chosenBackendKey, slot)}
+		ctx := context.WithValue(ss.Context(), chosenBackendKey, slot)
+		wrapped := &slotStream{ServerStream: ss, ctx: ctx}
+
+		// The proxy director normally runs before RecvMsg, so it cannot see
+		// request fields. For manifest-declared height queries, receive the
+		// first frame now, extract its routing height, and replay the exact
+		// protobuf payload when mwitkow starts its normal forwarding loop.
+		if method, ok := grpc.MethodFromServerStream(ss); ok {
+			md, _ := metadata.FromIncomingContext(ss.Context())
+			_, hasMetadataHeight := metadataHeight(md)
+			if _, bodyRoutable := Lookup(method); bodyRoutable && !hasMetadataHeight {
+				var first emptypb.Empty
+				if err := ss.RecvMsg(&first); err != nil {
+					return err
+				}
+				payload := append([]byte(nil), first.ProtoReflect().GetUnknown()...)
+				wrapped.first = payload
+				wrapped.hasFirst = true
+				if height, found := extractRequestHeight(method, payload); found {
+					wrapped.ctx = context.WithValue(ctx, requestHeightKey, height)
+				}
+			}
+		}
 		err := inner(srv, wrapped)
 		if name := slot.Get(); name != "" {
 			switch {
@@ -47,11 +73,28 @@ func streamHandler(dir *Director) grpc.StreamHandler {
 	}
 }
 
-// slotStream overrides Context() so the director sees the slot. All other
-// grpc.ServerStream methods pass through to the underlying stream.
+// slotStream exposes per-call routing state through Context. For body-routed
+// methods it also replays the first request frame that streamHandler consumed
+// before invoking the director; subsequent frames pass through unchanged.
 type slotStream struct {
 	grpc.ServerStream
-	ctx context.Context
+	ctx      context.Context
+	first    []byte
+	hasFirst bool
 }
 
 func (s *slotStream) Context() context.Context { return s.ctx }
+
+func (s *slotStream) RecvMsg(dst any) error {
+	if !s.hasFirst {
+		return s.ServerStream.RecvMsg(dst)
+	}
+	s.hasFirst = false
+	payload := s.first
+	s.first = nil
+	msg, ok := dst.(proto.Message)
+	if !ok {
+		return fmt.Errorf("cosmos_grpc: cannot replay first request into %T", dst)
+	}
+	return proto.Unmarshal(payload, msg)
+}
