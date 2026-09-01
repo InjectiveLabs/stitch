@@ -27,13 +27,24 @@ const HeightHeader = "x-cosmos-block-height"
 // backend name into so the post-call wrapper can credit the breaker.
 type ctxKey int
 
-const chosenBackendKey ctxKey = iota
+const (
+	chosenBackendKey ctxKey = iota
+	requestHeightKey
+)
 
 // chosenSlot returns the per-RPC choice slot the wrapper installs, or nil
 // if no slot is present (e.g. unit tests calling the director directly).
 func chosenSlot(ctx context.Context) *atomicString {
 	v, _ := ctx.Value(chosenBackendKey).(*atomicString)
 	return v
+}
+
+func requestHeight(ctx context.Context) *int64 {
+	h, ok := ctx.Value(requestHeightKey).(int64)
+	if !ok || h <= 0 {
+		return nil
+	}
+	return &h
 }
 
 // atomicString is a tiny mutable string slot — cheaper than sync.Map for
@@ -95,7 +106,8 @@ func (d *Director) Direct(ctx context.Context, fullMethodName string) (context.C
 	ctx = log.WithMethod(ctx, fullMethodName)
 
 	md, _ := metadata.FromIncomingContext(ctx)
-	key := buildRouteKey(fullMethodName, md)
+	bodyHeight := requestHeight(ctx)
+	key := buildRouteKey(fullMethodName, md, bodyHeight)
 
 	candidates := d.selector.Candidates(key)
 	if len(candidates) == 0 {
@@ -126,8 +138,14 @@ func (d *Director) Direct(ctx context.Context, fullMethodName string) (context.C
 		if slot := chosenSlot(ctx); slot != nil {
 			slot.Set(b.Name)
 		}
-		// Forward incoming metadata to upstream verbatim.
-		out := metadata.NewOutgoingContext(ctx, md.Copy())
+		// Forward incoming metadata to upstream. When routing came only from a
+		// request-body height, add the equivalent Cosmos metadata so BaseApp
+		// queries also open the matching historical store version.
+		outMD := md.Copy()
+		if _, hasMetadataHeight := metadataHeight(md); !hasMetadataHeight && bodyHeight != nil {
+			outMD.Set(HeightHeader, strconv.FormatInt(*bodyHeight, 10))
+		}
+		out := metadata.NewOutgoingContext(ctx, outMD)
 		// Stamp a tracing-style request id so upstream logs correlate.
 		out = metadata.AppendToOutgoingContext(out, "x-stitch-request-id", rid)
 		metrics.RequestsTotal.WithLabelValues(string(types.ProtoGRPC), key.Class.String(), b.Name, "directed").Inc()
@@ -160,9 +178,11 @@ func (d *Director) ReleaseOutcome(backend string) {
 	d.circuit.Release(backend, types.ProtoGRPC)
 }
 
-// buildRouteKey reads metadata + method name and produces a routing
-// decision. Broadcast detection is by method-name suffix.
-func buildRouteKey(fullMethod string, md metadata.MD) types.RouteKey {
+// buildRouteKey reads metadata, an optional pre-decoded request-body height,
+// and the method name to produce a routing decision. A valid metadata height
+// wins over the body for backward compatibility. Broadcasts ignore both so a
+// stray height cannot send a write to a historical shard.
+func buildRouteKey(fullMethod string, md metadata.MD, bodyHeight *int64) types.RouteKey {
 	key := types.RouteKey{
 		Protocol:   types.ProtoGRPC,
 		Method:     fullMethod,
@@ -174,14 +194,28 @@ func buildRouteKey(fullMethod string, md metadata.MD) types.RouteKey {
 	if isBroadcast(fullMethod) {
 		key.Class = types.ClassBroadcast
 		key.Idempotent = false
+		return key
 	}
-	if vs := md.Get(HeightHeader); len(vs) > 0 {
-		if h, err := strconv.ParseInt(vs[0], 10, 64); err == nil && h > 0 {
-			key.Height = &h
-			key.Class = types.ClassByHeight
-		}
+	if h, ok := metadataHeight(md); ok {
+		key.Height = &h
+		key.Class = types.ClassByHeight
+		return key
+	}
+	if bodyHeight != nil && *bodyHeight > 0 {
+		h := *bodyHeight
+		key.Height = &h
+		key.Class = types.ClassByHeight
 	}
 	return key
+}
+
+func metadataHeight(md metadata.MD) (int64, bool) {
+	vs := md.Get(HeightHeader)
+	if len(vs) == 0 {
+		return 0, false
+	}
+	h, err := strconv.ParseInt(vs[0], 10, 64)
+	return h, err == nil && h > 0
 }
 
 func isBroadcast(method string) bool {

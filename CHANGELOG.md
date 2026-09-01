@@ -9,6 +9,14 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Added
 
+- Cosmos gRPC now routes supported historical queries from the protobuf
+  request body as well as `x-cosmos-block-height` metadata. The proxy buffers
+  and replays the first request message unchanged, and an embedded method/field
+  manifest covers the five exposed Cosmos `height` queries plus four IBC fee
+  `query_height` queries. Body-derived routes also stamp the matching upstream
+  metadata for BaseApp historical-store selection. Incoming metadata retains
+  precedence; unknown or semantically unrelated height-like fields are never
+  guessed.
 - `/injstream-ws` multicast is now actually wired, behind
   `policies.subscriptions.multicast` (default **false**). It was advertised
   in the README and parsed from config, but the multicast hub had zero
