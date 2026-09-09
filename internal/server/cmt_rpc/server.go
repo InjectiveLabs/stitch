@@ -9,6 +9,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/InjectiveLabs/stitch/internal/cache"
@@ -95,6 +96,24 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Hash-memo fast path: convert ClassByHash → ClassByHeight when known.
 	s.applyHashCache(&d)
+	if hints := r.Header.Values("x-stitch-backend"); len(hints) > 0 {
+		if len(hints) != 1 || hints[0] == "" || hints[0] != strings.TrimSpace(hints[0]) || strings.ContainsAny(hints[0], ",\r\n") {
+			writeJSONRPCError(w, http.StatusBadRequest, "invalid x-stitch-backend header")
+			return
+		}
+		concreteHeight := d.key.Class == types.ClassByHeight && d.key.HeightOrZero() > 0
+		concreteRange := d.key.Class == types.ClassByHeightRange && d.key.Range != nil &&
+			d.key.Range.Lower != nil && *d.key.Range.Lower > 0 && d.key.Range.Upper != nil &&
+			*d.key.Range.Upper >= *d.key.Range.Lower
+		if !d.key.Idempotent || (!concreteHeight && !concreteRange) {
+			writeJSONRPCError(w, http.StatusBadRequest, "x-stitch-backend requires a historical read")
+			return
+		}
+		// Earliest discovery verified this source's actual data, which can
+		// differ from another shard with overlapping declared coverage.
+		// The selector still enforces coverage, health, drain and circuits.
+		d.key.Backend = hints[0]
+	}
 
 	log.FromCtx(ctx).Debug("cmt_rpc request",
 		"class", d.key.Class.String(),
@@ -108,7 +127,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Response-cache fast path on cacheable + height-keyed reads.
-	if s.respCache != nil && d.key.Cacheable && d.key.Idempotent && d.key.Class == types.ClassByHeight {
+	// A pinned read must reach its verified source and recheck eligibility;
+	// shared entries may come from another shard with incomplete data.
+	if s.respCache != nil && d.key.Backend == "" && d.key.Cacheable && d.key.Idempotent && d.key.Class == types.ClassByHeight {
 		height := d.key.HeightOrZero()
 		var head int64
 		if s.head != nil {

@@ -81,13 +81,14 @@ func (a *atomicString) Get() string {
 // retried after partial response delivery; failover only applies before
 // the first message lands. Phase 5's subscription hub adds proper resume.
 type Director struct {
-	selector selector.Selector
-	circuit  *circuit.Manager
-	pool     *pool.GRPCPool
+	selector      selector.Selector
+	circuit       *circuit.Manager
+	pool          *pool.GRPCPool
+	earliestSlots chan struct{}
 }
 
 func NewDirector(s selector.Selector, c *circuit.Manager, p *pool.GRPCPool) *Director {
-	return &Director{selector: s, circuit: c, pool: p}
+	return &Director{selector: s, circuit: c, pool: p, earliestSlots: make(chan struct{}, 32)}
 }
 
 // Direct chooses an upstream for fullMethodName. Returns the modified
@@ -108,6 +109,12 @@ func (d *Director) Direct(ctx context.Context, fullMethodName string) (context.C
 	md, _ := metadata.FromIncomingContext(ctx)
 	bodyHeight := requestHeight(ctx)
 	key := buildRouteKey(fullMethodName, md, bodyHeight)
+	if values := md.Get(BackendHeader); len(values) > 0 {
+		if len(values) != 1 || values[0] == "" || strings.ContainsAny(values[0], " ,\t\r\n") || key.Class != types.ClassByHeight || !key.Idempotent {
+			return ctx, nil, status.Error(codes.InvalidArgument, "backend affinity requires one backend and a concrete read height")
+		}
+		key.Backend = values[0]
+	}
 
 	candidates := d.selector.Candidates(key)
 	if len(candidates) == 0 {
@@ -142,6 +149,9 @@ func (d *Director) Direct(ctx context.Context, fullMethodName string) (context.C
 		// request-body height, add the equivalent Cosmos metadata so BaseApp
 		// queries also open the matching historical store version.
 		outMD := md.Copy()
+		outMD.Delete(BackendHeader)
+		outMD.Delete(EarliestCapabilityHeader)
+		outMD.Delete(EarliestHeightHeader)
 		if _, hasMetadataHeight := metadataHeight(md); !hasMetadataHeight && bodyHeight != nil {
 			outMD.Set(HeightHeader, strconv.FormatInt(*bodyHeight, 10))
 		}

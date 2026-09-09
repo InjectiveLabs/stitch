@@ -26,6 +26,9 @@ import (
 func streamHandler(dir *Director) grpc.StreamHandler {
 	inner := proxy.TransparentHandler(dir.Direct)
 	return func(srv any, ss grpc.ServerStream) error {
+		if md, ok := metadata.FromIncomingContext(ss.Context()); ok && len(md.Get(EarliestHeader)) > 0 {
+			return dir.serveEarliest(ss, md)
+		}
 		slot := &atomicString{}
 		_, hadDeadline := ss.Context().Deadline()
 		ctx := context.WithValue(ss.Context(), chosenBackendKey, slot)
@@ -53,9 +56,14 @@ func streamHandler(dir *Director) grpc.StreamHandler {
 		}
 		err := inner(srv, wrapped)
 		if name := slot.Get(); name != "" {
+			method, _ := grpc.MethodFromServerStream(ss)
 			switch {
 			case err == nil:
 				dir.RecordOutcome(name, true)
+			case earliestDomainOutcome(method, err):
+				// An absent account at a verified historical snapshot is a
+				// valid application outcome, not a backend failure.
+				dir.ReleaseOutcome(name)
 			case errors.Is(ss.Context().Err(), context.Canceled) && !hadDeadline:
 				// Convention (mirrors forwarder/broadcast.go drainResults):
 				//   cancellation  = client walked away, neutral Release;

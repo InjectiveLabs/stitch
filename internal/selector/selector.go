@@ -71,10 +71,16 @@ func (s *RangeSelector) Candidates(k types.RouteKey) []*backend.Backend {
 	hProtos := healthProtocols(k.Protocol)
 	picks := make([]scored, 0, len(all))
 	for _, b := range all {
+		if k.Backend != "" && b.Name != k.Backend {
+			continue
+		}
 		if !b.Has(k.Protocol) {
 			continue
 		}
 		if s.registry.IsDrained(b.Name) {
+			continue
+		}
+		if k.Class == types.ClassEarliest && b.Coverage.Kind == backend.CovPruned {
 			continue
 		}
 		if k.Class == types.ClassByHeight && k.Height != nil {
@@ -98,7 +104,16 @@ func (s *RangeSelector) Candidates(k types.RouteKey) []*backend.Backend {
 			hs    health.Snapshot
 			found bool
 		)
-		for _, hp := range hProtos {
+		witnesses := hProtos
+		if (k.Class == types.ClassEarliest || k.Backend != "") && b.Coverage.Kind == backend.CovBounded {
+			if protocolHealth, ok := s.health.Get(b.Name, k.Protocol); ok && !protocolHealth.Healthy {
+				continue
+			}
+			// Bounded verification publishes RPC health, while its periodic
+			// gRPC prober is disabled. Discovery must honor that verdict.
+			witnesses = []types.Protocol{types.ProtoRPC, k.Protocol}
+		}
+		for _, hp := range witnesses {
 			if hs, found = s.health.Get(b.Name, hp); found {
 				break
 			}
@@ -127,6 +142,20 @@ func (s *RangeSelector) Candidates(k types.RouteKey) []*backend.Backend {
 	out := make([]*backend.Backend, len(picks))
 	for i, p := range picks {
 		out[i] = p.b
+	}
+	return out
+}
+
+// EarliestUniverse includes active archive shards before health and circuit
+// filtering. Discovery uses excluded shards only to report an incomplete
+// search if an unavailable backend could contain an older answer. Drained
+// and pruned backends are outside the configured archive search scope.
+func (s *RangeSelector) EarliestUniverse() []*backend.Backend {
+	var out []*backend.Backend
+	for _, b := range s.registry.Snapshot() {
+		if b.Has(types.ProtoGRPC) && b.Coverage.Kind != backend.CovPruned && !s.registry.IsDrained(b.Name) {
+			out = append(out, b)
+		}
 	}
 	return out
 }

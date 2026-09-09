@@ -6,6 +6,7 @@ package types
 type RouteKey struct {
 	Protocol   Protocol
 	Method     string // e.g. "block", "eth_getBalance" — for metrics labels
+	Backend    string // optional verified-backend affinity; never bypasses eligibility
 	Class      MethodClass
 	Height     *int64 // nil = latest / unknown
 	Range      *HeightRange
