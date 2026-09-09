@@ -152,6 +152,7 @@ func (d *Director) Direct(ctx context.Context, fullMethodName string) (context.C
 		outMD.Delete(BackendHeader)
 		outMD.Delete(EarliestCapabilityHeader)
 		outMD.Delete(EarliestHeightHeader)
+		outMD.Delete(ArchiveChainIDHeader)
 		if _, hasMetadataHeight := metadataHeight(md); !hasMetadataHeight && bodyHeight != nil {
 			outMD.Set(HeightHeader, strconv.FormatInt(*bodyHeight, 10))
 		}

@@ -1,138 +1,101 @@
-# Earliest EVM history through Stitch
+# EVM archive routing
 
-Stitch discovers the first retained, initialized EVM state across the active
-archive shards. Configured Cosmos coverage bounds the search; it does not prove
-that EVM state exists at the lower bound. There is no hardcoded activation height.
+Tracked by ID-1573 under ID-1568. See [the plan](archive-parity-plan.md).
 
-## Gateway contract
+## One logical archive
 
-With `WEB3INJ_STITCH_BACKEND=true`, evm-gateway resolves an explicit `earliest`
-selector before constructing dependent reads. It calls
-`/injective.evm.v1.Query/Params` with an empty protobuf request and metadata:
+Configure `archive.evm_start_height` and `archive.cosmos_chain_id` with a
+verified EVM history boundary and Cosmos chain identity. Configure the same
+`WEB3INJ_ARCHIVE_START_HEIGHT` in the gateway and enable
+`WEB3INJ_STITCH_BACKEND` only after verification. This boundary is independent
+of indexing backfill, shard layout, health, drain state, and method capability.
+There is no default activation height. An archive profile requires restart to
+change; backend topology can still reload.
 
-```text
-stitch: earliest
-x-stitch-earliest-capability: state
-x-cosmos-block-height: 1
-```
+Every `earliest` request means the same configured height E. Missing proofs,
+state, results, or a trace's parent snapshot must not advance it. A zero or
+empty result and an absent account are valid at E; they do not initiate a
+search for the account's first appearance. Reads at E and derived heights
+such as E−1 may use different backends. The backend actually executing a trace
+still needs that operation's real execution dependencies.
 
-The last header is a legacy rollout placeholder. Upgraded Stitch consumes the
-marker, discards the placeholder, and probes concrete heights. Old Stitch does
-not produce the required discovery response headers, so the gateway rejects its
-response rather than treating it as successful discovery.
+## Gateway handshake
 
-A successful response contains the Params protobuf and three required headers:
+Call `/injective.evm.v1.Query/Params` with `stitch: archive-profile` to read
+the configured contract without depending on upstream liveness. The response
+has an empty Params payload and these metadata keys:
 
-```text
-x-stitch-earliest-height: <resolved Cosmos height>
-x-cosmos-block-height: <same resolved Cosmos height>
-x-stitch-backend: <verified backend name>
-```
+- `x-stitch-earliest-height`: configured E
+- `x-cosmos-block-height`: the same E
+- `x-stitch-cosmos-chain-id`: configured Cosmos chain identity
 
-The gateway pins dependent gRPC and Comet reads to that height and backend using
-`x-stitch-backend`. A hint is accepted only for concrete historical reads and
-does not bypass endpoint, coverage, drain, health, or circuit checks. If the
-verified backend becomes unavailable, the operation fails instead of silently
-using an unverified snapshot. Pinned Comet requests bypass Stitch's response
-cache so a cached response cannot bypass the selected backend's current
-eligibility checks. Internal routing headers are consumed before requests reach
-a normal upstream node.
+The gateway checks this profile at startup. Runtime resolution is local,
+allowing complete immutable cache entries to remain useful during an outage.
+The existing `stitch: earliest` marker still makes a real state query at E.
+Capability values remain accepted for rollout compatibility but never change
+the selected height. Actual dependent queries validate their own requirements.
+No physical-backend affinity is needed in the new contract.
 
-## Capabilities
+## Historical reads
 
-`x-stitch-earliest-capability` accepts one value, defaulting to `state`:
+Supported read-only unary gRPC calls are buffered before publishing a reply.
+Unavailable state, transport failure, or an invalid returned height can retry
+another eligible replica at the identical height. Valid application errors
+are preserved; account absence requires a same-snapshot witness. The gRPC
+endpoint's own GetNodeInfo response witnesses Cosmos chain identity without
+downloading a block for every state read.
 
-| Value | Required data at candidate height H |
-| --- | --- |
-| `state` | Initialized EVM Params and retained state at H |
-| `execution` | State and Comet block at H |
-| `block` | State, Comet block, and block results at H |
-| `range` | Same as block; resolves the boundary, not the complete result range |
-| `trace` | State at H and H−1, block and block results at H |
-| `proof` | State, block, and EVM/auth store proofs at H; H must exceed 2 |
-| `storage` | State and EVM store subspace access at H |
+With an archive profile, Comet block/header/commit/results, ABCI,
+consensus-parameter, validator, and height-qualified transaction searches
+validate historical responses before release. The same HTTP endpoint's status
+witnesses chain identity. Block responses additionally carry the requested
+height and chain; ABCI success must report the requested height. HTTP-200
+missing-history errors are not successful data. Legacy response and hash
+caches are bypassed for these adapters, preventing parameter collisions and
+cached routing/errors from bypassing validation.
 
-Range execution remains responsible for every block in the requested interval;
-discovering a starting height does not establish later shard coverage or permit
-returning partial logs. Executions and proofs use H, matching the actual gateway
-and SDK request paths. Only block tracing requires the parent snapshot H−1.
+These checks establish endpoint chain identity and response consistency, not
+cryptographic proof that every configured replica is on the canonical fork.
+Operators must verify archive provenance. Real proof/trace and cross-protocol
+identity validation remains part of the parity release gate.
 
-Read-only unary Account, CosmosAccount, Balance, Code, Storage, BaseFee, and
-Params queries can also use the marker directly. Stitch buffers their responses
-until it selects the winner. Other methods must resolve Params first, then
-construct their concrete-height request. Streaming and write methods reject the
-marker.
+## Unknown block and Ethereum transaction hashes
 
-## Discovery and validity
+`block_by_hash` searches archive candidates, including old bounded shards.
+A positive result must match the requested block ID, chain, and configured
+coverage. A global miss requires successful lookup coverage across the full
+logical interval E through the observed archive head. A drained or unhealthy
+sole owner leaves the search incomplete; a healthy equivalent replica can
+cover the same interval. Coverage holes never count as absence.
 
-Each eligible archive, bounded, or open shard first reports its observed head
-through Params. Stitch intersects that height with configured coverage, checks
-the lower bound, and binary-searches the first available EVM state when necessary.
-The first stage uses only the small Params response. Required block, results,
-proof, or operation-specific state are checked at that resolved floor; another
-binary search is needed only when that capability begins later. This avoids
-fetching large arbitrary midpoint blocks during ordinary state discovery.
-Tracing starts that second stage one block after the established state floor,
-because its parent must also have retained initialized EVM state.
-This search assumes each shard retains a contiguous historical state window and
-that EVM initialization is persistent once established. It does not assume that
-an account's existence, transaction contents, or application results are
-monotonic. Disjoint state retention must be represented as separate coverage
-windows; the resolver does not scan arbitrary holes block by block.
+The narrow `tx_search` predicate
+`ethereum_tx.ethereumTxHash='<hash>'` is searched across historical shards.
+Each query is constrained to the shard's interval. Results validate transaction
+bytes against the Comet hash and the requested Ethereum hash event, then merge
+in height/index order with overlap deduplication and global pagination.
+Conflicting replica results, missing required intervals, or truncated searches
+fail explicitly. The gateway must additionally decode the actual EVM
+transaction and verify its hash: event metadata alone is not sufficient.
 
-A valid Params response requires a nonempty `params.evm_denom` and an exact
-`x-cosmos-block-height` response. Successful pre-EVM default Params therefore do
-not qualify. Recognized SDK missing-store-version errors mean the snapshot is
-unavailable. Timeouts, malformed responses, wrong heights, and unexpected errors
-leave discovery unresolved. Capability probes also verify their returned heights
-and required block/results/proof presence. A missing capability permits other
-shards to answer.
+An empty event search does not establish complete Ethereum transaction absence;
+failed transactions may not emit the event. The gateway requires a complete
+history index to answer that case definitively. Generic Comet search federation,
+search proofs, header-by-hash federation, and transaction broadcast are outside
+this adapter's scope.
 
-For direct state queries, successful zero or empty payloads and a normal
-account-NotFound response are valid answers at the resolved snapshot. They never
-cause a search for a later nonempty account. Missing historical state is a
-separate outcome and never becomes a zero nonce or empty success. Hash/object
-lookups do not use this state-discovery adapter.
+## Bounds and validation
 
-All candidate outcomes are compared by verified height; completion order does
-not matter. Equal heights use configured weight and then backend name. A failed
-candidate that could contain an older answer causes `Unavailable: earliest
-discovery incomplete`. A working replica at the same known lower bound can
-establish the same oldest height even if another replica fails. A replica whose
-actual retained floor is later cannot prove what an unavailable older replica
-contains, so that case remains incomplete. Explicitly drained backends and
-pruned live nodes are outside archive discovery scope. Health- or circuit-blocked
-archive shards remain evidence of an incomplete search when potentially older.
+Comet archive operations have a 30-second overall deadline and bounded attempt
+timeouts. At most four HTTP attempts execute concurrently per listener.
+Block/results responses are capped at 64 MiB; transaction search at 8 MiB;
+status at 64 KiB. Searches accept at most 256 candidates and 100 distinct
+exact-hash matches with an 8 MiB aggregate payload budget. Requests exceeding
+these budgets fail rather than return partial data. No response is released
+until validated.
 
-If all reachable candidates prove that the requested history/capability is
-unavailable, Stitch returns `FailedPrecondition`, distinct from an application's
-`NotFound` response. No newer result is labeled as earliest while older evidence
-is unresolved.
-
-## Resource bounds and rollout
-
-Discovery has a 30-second overall budget, bounded by any shorter caller
-deadline. Unary gRPC probes have a 3-second budget; Comet reads allow 10 seconds
-for large activation-block results, still within the overall budget. Four workers search each
-request's shards, with at most 32 simultaneous probes across a Director and a
-256-candidate per-request limit. Historical search is logarithmic in each
-configured window. Request payloads are capped at 1 MiB, Params responses at
-64 KiB, and selected unary query responses at 8 MiB. Only the winning query
-payload is retained after each candidate completes. Comet capability responses
-have a 128 MiB read budget but stream through a bounded JSON projection: large
-transaction, event, and proof strings are validated and discarded instead of
-being buffered. Every proof operation must be an object with nonempty string
-`type` and `data` fields; the data is discarded after validating its JSON shape.
-This witnesses proof availability without claiming cryptographic verification.
-Retained metadata is limited to 64 KiB with a maximum nesting
-depth of 64. Truncated, malformed, trailing, and over-budget JSON fail discovery.
-
-Discovery runs per operation and does not cache a floor that could become stale
-after an archive restore. This adds historical query load and latency; enable
-the gateway flag only after deploying Stitch and validating archive state and
-capability coverage. Selected and incomplete outcomes appear in
-`stitch_requests_total` with `method_class="earliest"`.
-
-Tracked by ID-1573, a sub-issue of ID-1568. Independent tests exercise the actual
-gRPC and Comet listeners with historical fixtures, response ordering, health,
-circuits, exact metadata, empty state, affinity, and request budgets.
+Run `go test ./...`, focused/full race tests, vet, and the cross-service fixture
+tests. Synthetic fixtures establish regression behavior, not complete native
+archive equivalence. Before enablement, run the read-only differential corpus
+against a complete archive and the same history served through real retained
+shards, including failed transactions, genuine proofs, traces, and cache phases.
+Do not use illustrative discussion heights as deployment configuration.

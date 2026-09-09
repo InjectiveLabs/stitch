@@ -5,9 +5,11 @@ package selector
 
 import (
 	"sort"
+	"sync/atomic"
 
 	"github.com/InjectiveLabs/stitch/internal/backend"
 	"github.com/InjectiveLabs/stitch/internal/circuit"
+	"github.com/InjectiveLabs/stitch/internal/config"
 	"github.com/InjectiveLabs/stitch/internal/health"
 	"github.com/InjectiveLabs/stitch/internal/types"
 )
@@ -40,6 +42,49 @@ type RangeSelector struct {
 	circuit  *circuit.Manager
 	weights  Weights
 	maxLag   int64
+	archive  atomic.Pointer[config.ArchiveProfile]
+}
+
+// SetArchiveProfile installs a copy of the logical archive declaration.
+// Production sets it at startup; changing archive identity requires a restart.
+func (s *RangeSelector) SetArchiveProfile(profile *config.ArchiveProfile) {
+	if profile == nil {
+		s.archive.Store(nil)
+		return
+	}
+	snapshot := *profile
+	s.archive.Store(&snapshot)
+}
+
+func (s *RangeSelector) ArchiveProfile() (config.ArchiveProfile, bool) {
+	profile := s.archive.Load()
+	if profile == nil || profile.EVMStartHeight <= 0 || profile.CosmosChainID == "" {
+		return config.ArchiveProfile{}, false
+	}
+	return *profile, true
+}
+
+// ArchiveUniverse includes declared historical coverage even when its backend
+// is drained, unhealthy, or circuit-blocked. Consumers need that universe when
+// deciding whether a global absence result is complete.
+func (s *RangeSelector) ArchiveUniverse(protocol types.Protocol) []*backend.Backend {
+	var out []*backend.Backend
+	for _, b := range s.registry.Snapshot() {
+		if b.Has(protocol) && b.Coverage.Kind != backend.CovPruned {
+			out = append(out, b)
+		}
+	}
+	return out
+}
+
+func (s *RangeSelector) ArchiveHead() int64 {
+	head := s.health.MaxHead()
+	for _, b := range s.registry.Snapshot() {
+		if b.Coverage.Kind == backend.CovBounded {
+			head = max(head, b.Coverage.Upper)
+		}
+	}
+	return head
 }
 
 func NewRangeSelector(reg *backend.Registry, h *health.Registry, c *circuit.Manager, maxLag int64) *RangeSelector {
@@ -105,7 +150,7 @@ func (s *RangeSelector) Candidates(k types.RouteKey) []*backend.Backend {
 			found bool
 		)
 		witnesses := hProtos
-		if (k.Class == types.ClassEarliest || k.Backend != "") && b.Coverage.Kind == backend.CovBounded {
+		if b.Coverage.Kind == backend.CovBounded && (k.Class == types.ClassEarliest || k.Backend != "" || (k.Protocol == types.ProtoGRPC && k.Class == types.ClassByHeight)) {
 			if protocolHealth, ok := s.health.Get(b.Name, k.Protocol); ok && !protocolHealth.Healthy {
 				continue
 			}
@@ -151,13 +196,7 @@ func (s *RangeSelector) Candidates(k types.RouteKey) []*backend.Backend {
 // search if an unavailable backend could contain an older answer. Drained
 // and pruned backends are outside the configured archive search scope.
 func (s *RangeSelector) EarliestUniverse() []*backend.Backend {
-	var out []*backend.Backend
-	for _, b := range s.registry.Snapshot() {
-		if b.Has(types.ProtoGRPC) && b.Coverage.Kind != backend.CovPruned && !s.registry.IsDrained(b.Name) {
-			out = append(out, b)
-		}
-	}
-	return out
+	return s.ArchiveUniverse(types.ProtoGRPC)
 }
 
 func rangeEligible(c backend.Coverage, r types.HeightRange, head int64) bool {

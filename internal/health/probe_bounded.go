@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net/http"
 	"strconv"
 	"strings"
@@ -204,7 +205,8 @@ func (v *BoundedVerifier) publish(b *backend.Backend, healthy bool, lastError st
 	// A hot reload may have pruned this backend while verification was in
 	// flight (retries span tens of seconds); publishing now would resurrect
 	// its snapshot and gauges.
-	if !v.registry.Has(b.Name) {
+	current := v.registry.Find(b.Name)
+	if current == nil || current.Coverage != b.Coverage || !maps.Equal(current.Endpoints, b.Endpoints) {
 		return
 	}
 	snap := Snapshot{

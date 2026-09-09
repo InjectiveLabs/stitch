@@ -269,7 +269,8 @@ func copyHeaders(dst, src http.Header) {
 		switch strings.ToLower(k) {
 		case "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
 			"te", "trailer", "transfer-encoding", "upgrade",
-			"stitch", "x-stitch-backend", "x-stitch-earliest-capability":
+			"stitch", "x-stitch-backend", "x-stitch-earliest-capability",
+			"x-stitch-earliest-height", "x-stitch-cosmos-chain-id":
 			continue
 		}
 		for _, v := range vs {

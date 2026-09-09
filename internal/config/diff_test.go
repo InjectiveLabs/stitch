@@ -134,6 +134,7 @@ func TestDiffNonReloadableClassifiesEveryField(t *testing.T) {
 		"Log":      "reloadable",
 		"Policies": "diffed", // per-field below
 		"Backends": "reloadable",
+		"Archive":  "diffed",
 		"Auth":     "dead", // phase 8: classify on implementation
 		// PoliciesConfig
 		"Policies.Failover":         "diffed",

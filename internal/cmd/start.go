@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"runtime"
 	"sync"
 	"time"
@@ -62,6 +63,7 @@ func startCmd() *cobra.Command {
 				OpenDuration:   cfg.Policies.Circuit.OpenDuration,
 			})
 			selCore := selector.NewRangeSelector(reg, h, cmgr, cfg.Policies.Health.MaxLagBlocks)
+			selCore.SetArchiveProfile(cfg.Archive)
 			httpPool := pool.NewHTTPPool()
 			grpcPool := pool.NewGRPCPool(5 * time.Minute)
 			hashIdx := cache.New(cfg.Policies.Cache.HashIndexEntries)
@@ -181,9 +183,16 @@ func startCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
+				if !reflect.DeepEqual(next.Archive, bootCfg.Archive) {
+					return fmt.Errorf("archive profile cannot change during reload; restart with the new profile")
+				}
 				newBackends, err := backend.FromConfig(next.Backends)
 				if err != nil {
 					return err
+				}
+				previous := make(map[string]*backend.Backend)
+				for _, b := range reg.Snapshot() {
+					previous[b.Name] = b
 				}
 				holder.Swap(next) // registry of last-loaded config
 				reg.Set(newBackends)
@@ -193,11 +202,20 @@ func startCmd() *cobra.Command {
 				// deliberately left alone — they're cumulative history, and
 				// rates over them decay on their own.
 				active := make(map[string]struct{}, len(newBackends))
+				reverifyBounded := false
 				for _, b := range newBackends {
-					active[b.Name] = struct{}{}
+					old, existed := previous[b.Name]
+					if existed && reflect.DeepEqual(old.Endpoints, b.Endpoints) && old.Coverage == b.Coverage {
+						active[b.Name] = struct{}{}
+					} else if b.Coverage.Kind == backend.CovBounded {
+						reverifyBounded = true
+					}
 				}
 				h.Prune(active)
 				cmgr.Prune(active)
+				if reverifyBounded {
+					go health.NewBoundedVerifier(reg, h).Run(ctx)
+				}
 				// Reconcile the eth_ws head trackers NOW so a removed
 				// backend's newHeads stream stops resurrecting pruned
 				// snapshots instead of surviving until the next 30s tick.

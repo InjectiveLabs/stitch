@@ -20,6 +20,7 @@ func DiffNonReloadable(prev, next *Config) []string {
 		}
 	}
 	add("listen", prev.Listen, next.Listen)
+	add("archive", prev.Archive, next.Archive)
 	add("policies.failover", prev.Policies.Failover, next.Policies.Failover)
 	add("policies.hedging", prev.Policies.Hedging, next.Policies.Hedging)
 	add("policies.circuit", prev.Policies.Circuit, next.Policies.Circuit)

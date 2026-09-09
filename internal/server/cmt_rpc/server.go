@@ -22,14 +22,15 @@ import (
 
 // Server is the CometBFT RPC listener.
 type Server struct {
-	addr      string
-	fwd       *forwarder.HTTP
-	cache     *cache.HashIndex
-	respCache *cache.ResponseCache
-	head      cache.HeadProvider
-	confDepth int64
-	cacheTTL  time.Duration
-	srv       *http.Server
+	addr         string
+	fwd          *forwarder.HTTP
+	cache        *cache.HashIndex
+	respCache    *cache.ResponseCache
+	head         cache.HeadProvider
+	confDepth    int64
+	cacheTTL     time.Duration
+	archiveSlots chan struct{}
+	srv          *http.Server
 }
 
 // SetHashCache attaches a shared hash→height index for memoization on
@@ -46,7 +47,7 @@ func (s *Server) SetResponseCache(c *cache.ResponseCache, head cache.HeadProvide
 }
 
 func New(addr string, fwd *forwarder.HTTP) *Server {
-	s := &Server{addr: addr, fwd: fwd}
+	s := &Server{addr: addr, fwd: fwd, archiveSlots: make(chan struct{}, 4)}
 	mux := http.NewServeMux()
 	mux.Handle("/", s)
 	mux.HandleFunc("/websocket", websocketStub)
@@ -94,6 +95,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		r.ContentLength = int64(len(d.body))
 	}
 
+	// Validated archive reads bypass both legacy caches. A cached route or
+	// HTTP-200 error must not skip identity, height, or coverage validation.
+	if s.serveArchive(w, r, d) {
+		return
+	}
 	// Hash-memo fast path: convert ClassByHash → ClassByHeight when known.
 	s.applyHashCache(&d)
 	if hints := r.Header.Values("x-stitch-backend"); len(hints) > 0 {
