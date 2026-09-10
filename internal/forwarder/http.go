@@ -265,10 +265,12 @@ func buildUpstreamURL(base, path, rawQuery string) (string, error) {
 
 func copyHeaders(dst, src http.Header) {
 	for k, vs := range src {
-		// Strip hop-by-hop headers per RFC 7230.
+		// Strip hop-by-hop headers and private Stitch routing instructions.
 		switch strings.ToLower(k) {
 		case "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
-			"te", "trailer", "transfer-encoding", "upgrade":
+			"te", "trailer", "transfer-encoding", "upgrade",
+			"stitch", "x-stitch-backend", "x-stitch-earliest-capability",
+			"x-stitch-earliest-height", "x-stitch-cosmos-chain-id":
 			continue
 		}
 		for _, v := range vs {

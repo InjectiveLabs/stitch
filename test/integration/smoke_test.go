@@ -34,13 +34,16 @@ type upstream struct {
 	srv    *httptest.Server
 }
 
-func newUpstream(name string, height int64) *upstream {
+func newUpstream(name string, height int64, beforeReply ...func(*http.Request)) *upstream {
 	u := &upstream{name: name, height: height}
 	u.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		u.hits.Add(1)
 		if u.dead.Load() {
 			w.WriteHeader(503)
 			return
+		}
+		for _, wait := range beforeReply {
+			wait(r)
 		}
 		w.Header().Set("content-type", "application/json")
 		switch r.URL.Path {
@@ -75,10 +78,10 @@ func (r *testRig) close() {
 	r.shard.Close()
 }
 
-func setup(t *testing.T) *testRig {
+func setup(t *testing.T, beforeReply ...func(*http.Request)) *testRig {
 	t.Helper()
-	a := newUpstream("archive", 100000)
-	s := newUpstream("shard1", 100000)
+	a := newUpstream("archive", 100000, beforeReply...)
+	s := newUpstream("shard1", 100000, beforeReply...)
 
 	bs := []*backend.Backend{
 		{
@@ -225,7 +228,27 @@ func TestRESTHeightFromHeader(t *testing.T) {
 }
 
 func TestBroadcastFanOutHitsAllHealthyBackends(t *testing.T) {
-	rig := setup(t)
+	// Broadcast returns the first success and cancels remaining requests.
+	// Hold both replies until both handlers observe dispatch, so this tests
+	// fan-out rather than whether a losing dial beats winner cancellation.
+	var arrived atomic.Int64
+	ready := make(chan struct{})
+	rig := setup(t, func(r *http.Request) {
+		// Consume the body so net/http can observe a canceled request even
+		// when a regression leaves the other backend undispatched.
+		_, _ = io.Copy(io.Discard, r.Body)
+		if arrived.Add(1) == 2 {
+			close(ready)
+		}
+		timer := time.NewTimer(5 * time.Second)
+		defer timer.Stop()
+		select {
+		case <-ready:
+		case <-r.Context().Done():
+		case <-timer.C:
+			t.Error("timed out waiting for both broadcast handlers")
+		}
+	})
 	defer rig.close()
 
 	body := strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"broadcast_tx_sync","params":{"tx":"AAA="}}`)

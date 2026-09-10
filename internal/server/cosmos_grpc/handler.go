@@ -7,7 +7,9 @@ import (
 
 	"github.com/mwitkow/grpc-proxy/proxy"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/emptypb"
 )
@@ -26,6 +28,19 @@ import (
 func streamHandler(dir *Director) grpc.StreamHandler {
 	inner := proxy.TransparentHandler(dir.Direct)
 	return func(srv any, ss grpc.ServerStream) error {
+		if md, ok := metadata.FromIncomingContext(ss.Context()); ok && len(md.Get(EarliestHeader)) > 0 {
+			return dir.serveEarliest(ss, md)
+		}
+		if method, ok := grpc.MethodFromServerStream(ss); ok && historicalUnary(method) {
+			md, _ := metadata.FromIncomingContext(ss.Context())
+			_, configured := dir.archiveProfile()
+			if height, ok := metadataHeight(md); ok && configured {
+				if len(md.Get(HeightHeader)) != 1 {
+					return status.Error(codes.InvalidArgument, "historical requests require one height")
+				}
+				return dir.serveHistorical(ss, method, md, height)
+			}
+		}
 		slot := &atomicString{}
 		_, hadDeadline := ss.Context().Deadline()
 		ctx := context.WithValue(ss.Context(), chosenBackendKey, slot)
@@ -53,9 +68,14 @@ func streamHandler(dir *Director) grpc.StreamHandler {
 		}
 		err := inner(srv, wrapped)
 		if name := slot.Get(); name != "" {
+			method, _ := grpc.MethodFromServerStream(ss)
 			switch {
 			case err == nil:
 				dir.RecordOutcome(name, true)
+			case earliestDomainOutcome(method, err):
+				// An absent account at a verified historical snapshot is a
+				// valid application outcome, not a backend failure.
+				dir.ReleaseOutcome(name)
 			case errors.Is(ss.Context().Err(), context.Canceled) && !hadDeadline:
 				// Convention (mirrors forwarder/broadcast.go drainResults):
 				//   cancellation  = client walked away, neutral Release;

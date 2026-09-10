@@ -9,6 +9,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/InjectiveLabs/stitch/internal/cache"
@@ -21,14 +22,15 @@ import (
 
 // Server is the CometBFT RPC listener.
 type Server struct {
-	addr      string
-	fwd       *forwarder.HTTP
-	cache     *cache.HashIndex
-	respCache *cache.ResponseCache
-	head      cache.HeadProvider
-	confDepth int64
-	cacheTTL  time.Duration
-	srv       *http.Server
+	addr         string
+	fwd          *forwarder.HTTP
+	cache        *cache.HashIndex
+	respCache    *cache.ResponseCache
+	head         cache.HeadProvider
+	confDepth    int64
+	cacheTTL     time.Duration
+	archiveSlots chan struct{}
+	srv          *http.Server
 }
 
 // SetHashCache attaches a shared hash→height index for memoization on
@@ -45,7 +47,7 @@ func (s *Server) SetResponseCache(c *cache.ResponseCache, head cache.HeadProvide
 }
 
 func New(addr string, fwd *forwarder.HTTP) *Server {
-	s := &Server{addr: addr, fwd: fwd}
+	s := &Server{addr: addr, fwd: fwd, archiveSlots: make(chan struct{}, 4)}
 	mux := http.NewServeMux()
 	mux.Handle("/", s)
 	mux.HandleFunc("/websocket", websocketStub)
@@ -93,8 +95,31 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		r.ContentLength = int64(len(d.body))
 	}
 
+	// Validated archive reads bypass both legacy caches. A cached route or
+	// HTTP-200 error must not skip identity, height, or coverage validation.
+	if s.serveArchive(w, r, d) {
+		return
+	}
 	// Hash-memo fast path: convert ClassByHash → ClassByHeight when known.
 	s.applyHashCache(&d)
+	if hints := r.Header.Values("x-stitch-backend"); len(hints) > 0 {
+		if len(hints) != 1 || hints[0] == "" || hints[0] != strings.TrimSpace(hints[0]) || strings.ContainsAny(hints[0], ",\r\n") {
+			writeJSONRPCError(w, http.StatusBadRequest, "invalid x-stitch-backend header")
+			return
+		}
+		concreteHeight := d.key.Class == types.ClassByHeight && d.key.HeightOrZero() > 0
+		concreteRange := d.key.Class == types.ClassByHeightRange && d.key.Range != nil &&
+			d.key.Range.Lower != nil && *d.key.Range.Lower > 0 && d.key.Range.Upper != nil &&
+			*d.key.Range.Upper >= *d.key.Range.Lower
+		if !d.key.Idempotent || (!concreteHeight && !concreteRange) {
+			writeJSONRPCError(w, http.StatusBadRequest, "x-stitch-backend requires a historical read")
+			return
+		}
+		// Earliest discovery verified this source's actual data, which can
+		// differ from another shard with overlapping declared coverage.
+		// The selector still enforces coverage, health, drain and circuits.
+		d.key.Backend = hints[0]
+	}
 
 	log.FromCtx(ctx).Debug("cmt_rpc request",
 		"class", d.key.Class.String(),
@@ -108,7 +133,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Response-cache fast path on cacheable + height-keyed reads.
-	if s.respCache != nil && d.key.Cacheable && d.key.Idempotent && d.key.Class == types.ClassByHeight {
+	// A pinned read must reach its verified source and recheck eligibility;
+	// shared entries may come from another shard with incomplete data.
+	if s.respCache != nil && d.key.Backend == "" && d.key.Cacheable && d.key.Idempotent && d.key.Class == types.ClassByHeight {
 		height := d.key.HeightOrZero()
 		var head int64
 		if s.head != nil {

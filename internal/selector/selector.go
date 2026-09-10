@@ -5,9 +5,11 @@ package selector
 
 import (
 	"sort"
+	"sync/atomic"
 
 	"github.com/InjectiveLabs/stitch/internal/backend"
 	"github.com/InjectiveLabs/stitch/internal/circuit"
+	"github.com/InjectiveLabs/stitch/internal/config"
 	"github.com/InjectiveLabs/stitch/internal/health"
 	"github.com/InjectiveLabs/stitch/internal/types"
 )
@@ -40,6 +42,49 @@ type RangeSelector struct {
 	circuit  *circuit.Manager
 	weights  Weights
 	maxLag   int64
+	archive  atomic.Pointer[config.ArchiveProfile]
+}
+
+// SetArchiveProfile installs a copy of the logical archive declaration.
+// Production sets it at startup; changing archive identity requires a restart.
+func (s *RangeSelector) SetArchiveProfile(profile *config.ArchiveProfile) {
+	if profile == nil {
+		s.archive.Store(nil)
+		return
+	}
+	snapshot := *profile
+	s.archive.Store(&snapshot)
+}
+
+func (s *RangeSelector) ArchiveProfile() (config.ArchiveProfile, bool) {
+	profile := s.archive.Load()
+	if profile == nil || profile.EVMStartHeight <= 0 || profile.CosmosChainID == "" {
+		return config.ArchiveProfile{}, false
+	}
+	return *profile, true
+}
+
+// ArchiveUniverse includes declared historical coverage even when its backend
+// is drained, unhealthy, or circuit-blocked. Consumers need that universe when
+// deciding whether a global absence result is complete.
+func (s *RangeSelector) ArchiveUniverse(protocol types.Protocol) []*backend.Backend {
+	var out []*backend.Backend
+	for _, b := range s.registry.Snapshot() {
+		if b.Has(protocol) && b.Coverage.Kind != backend.CovPruned {
+			out = append(out, b)
+		}
+	}
+	return out
+}
+
+func (s *RangeSelector) ArchiveHead() int64 {
+	head := s.health.MaxHead()
+	for _, b := range s.registry.Snapshot() {
+		if b.Coverage.Kind == backend.CovBounded {
+			head = max(head, b.Coverage.Upper)
+		}
+	}
+	return head
 }
 
 func NewRangeSelector(reg *backend.Registry, h *health.Registry, c *circuit.Manager, maxLag int64) *RangeSelector {
@@ -71,10 +116,16 @@ func (s *RangeSelector) Candidates(k types.RouteKey) []*backend.Backend {
 	hProtos := healthProtocols(k.Protocol)
 	picks := make([]scored, 0, len(all))
 	for _, b := range all {
+		if k.Backend != "" && b.Name != k.Backend {
+			continue
+		}
 		if !b.Has(k.Protocol) {
 			continue
 		}
 		if s.registry.IsDrained(b.Name) {
+			continue
+		}
+		if k.Class == types.ClassEarliest && b.Coverage.Kind == backend.CovPruned {
 			continue
 		}
 		if k.Class == types.ClassByHeight && k.Height != nil {
@@ -98,7 +149,16 @@ func (s *RangeSelector) Candidates(k types.RouteKey) []*backend.Backend {
 			hs    health.Snapshot
 			found bool
 		)
-		for _, hp := range hProtos {
+		witnesses := hProtos
+		if b.Coverage.Kind == backend.CovBounded && (k.Class == types.ClassEarliest || k.Backend != "" || (k.Protocol == types.ProtoGRPC && k.Class == types.ClassByHeight)) {
+			if protocolHealth, ok := s.health.Get(b.Name, k.Protocol); ok && !protocolHealth.Healthy {
+				continue
+			}
+			// Bounded verification publishes RPC health, while its periodic
+			// gRPC prober is disabled. Discovery must honor that verdict.
+			witnesses = []types.Protocol{types.ProtoRPC, k.Protocol}
+		}
+		for _, hp := range witnesses {
 			if hs, found = s.health.Get(b.Name, hp); found {
 				break
 			}
@@ -129,6 +189,14 @@ func (s *RangeSelector) Candidates(k types.RouteKey) []*backend.Backend {
 		out[i] = p.b
 	}
 	return out
+}
+
+// EarliestUniverse includes active archive shards before health and circuit
+// filtering. Discovery uses excluded shards only to report an incomplete
+// search if an unavailable backend could contain an older answer. Drained
+// and pruned backends are outside the configured archive search scope.
+func (s *RangeSelector) EarliestUniverse() []*backend.Backend {
+	return s.ArchiveUniverse(types.ProtoGRPC)
 }
 
 func rangeEligible(c backend.Coverage, r types.HeightRange, head int64) bool {

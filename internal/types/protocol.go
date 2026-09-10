@@ -41,6 +41,10 @@ const (
 
 	// ClassBroadcast: tx submission; fan out to all healthy backends.
 	ClassBroadcast
+
+	// ClassEarliest discovers retained EVM history across archival shards.
+	// Coverage bounds constrain discovery, but do not select a fixed height.
+	ClassEarliest
 )
 
 func (c MethodClass) String() string {
@@ -59,6 +63,8 @@ func (c MethodClass) String() string {
 		return "subscribe"
 	case ClassBroadcast:
 		return "broadcast"
+	case ClassEarliest:
+		return "earliest"
 	default:
 		return "unknown"
 	}

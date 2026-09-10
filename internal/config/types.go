@@ -10,6 +10,14 @@ type Config struct {
 	Policies PoliciesConfig  `yaml:"policies"`
 	Backends []BackendConfig `yaml:"backends"`
 	Auth     AuthConfig      `yaml:"auth,omitempty"`
+	Archive  *ArchiveProfile `yaml:"archive,omitempty"`
+}
+
+// ArchiveProfile defines one logical archive independently of which shards
+// currently retain its data. It is optional for ordinary numeric routing.
+type ArchiveProfile struct {
+	EVMStartHeight int64  `yaml:"evm_start_height"`
+	CosmosChainID  string `yaml:"cosmos_chain_id"`
 }
 
 // ListenConfig groups the addresses for every protocol listener.

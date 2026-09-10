@@ -3,12 +3,21 @@ package config
 import (
 	"errors"
 	"fmt"
+	"strings"
 )
 
 // Validate runs semantic checks beyond YAML parsing.
 func Validate(c *Config) error {
 	if c == nil {
 		return errors.New("nil config")
+	}
+	if c.Archive != nil {
+		if c.Archive.EVMStartHeight < 1 {
+			return errors.New("archive.evm_start_height must be positive")
+		}
+		if c.Archive.CosmosChainID == "" || strings.TrimSpace(c.Archive.CosmosChainID) != c.Archive.CosmosChainID || strings.ContainsAny(c.Archive.CosmosChainID, " \t\r\n") {
+			return errors.New("archive.cosmos_chain_id must be a nonempty chain ID without whitespace")
+		}
 	}
 	if err := validateLog(c.Log); err != nil {
 		return err
