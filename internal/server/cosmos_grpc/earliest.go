@@ -187,7 +187,7 @@ func (d *Director) replayHistorical(ctx context.Context, method string, payload 
 	}
 	var lastErr error
 	for _, b := range candidates {
-		if err := ctx.Err(); err != nil {
+		if err := historicalContextError(ctx); err != nil {
 			return earliestReply{}, status.FromContextError(err).Err()
 		}
 		if profile != nil {
@@ -238,13 +238,27 @@ func (d *Director) replayHistorical(ctx context.Context, method string, payload 
 		metrics.RequestsTotal.WithLabelValues(string(types.ProtoGRPC), key.Class.String(), b.Name, "replayed").Inc()
 		return reply, nil
 	}
-	if err := ctx.Err(); err != nil {
+	if err := historicalContextError(ctx); err != nil {
 		return earliestReply{}, status.FromContextError(err).Err()
 	}
 	if lastErr != nil {
 		return earliestReply{}, status.Errorf(codes.Unavailable, "historical request unavailable at height %d: %v", height, lastErr)
 	}
 	return earliestReply{}, status.Errorf(codes.Unavailable, "no eligible backend for historical height %d", height)
+}
+
+func historicalContextError(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	// A child RPC can report its deadline before the enclosing context's
+	// timer callback sets Err. Check the deadline itself before classifying
+	// exhausted retries, without mistaking a backend's shorter timeout for
+	// expiration of the caller's remaining budget.
+	if deadline, ok := ctx.Deadline(); ok && !time.Now().Before(deadline) {
+		return context.DeadlineExceeded
+	}
+	return nil
 }
 
 func retryHistorical(err error) bool {
