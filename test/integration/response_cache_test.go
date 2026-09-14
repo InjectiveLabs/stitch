@@ -205,6 +205,57 @@ func TestResponseCacheDistinctParams(t *testing.T) {
 	}
 }
 
+func TestResponseCacheAmbiguousParamsDoNotAlias(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		protocol types.Protocol
+		method   string
+		params   [2]string
+	}{
+		{"EVM duplicate blockNumber", types.ProtoEthRPC, "eth_getBalance", [2]string{
+			`["0xabcd",{"blockNumber":"0x3039"}]`,
+			`["0xabcd",{"blockNumber":"0x3038","blockNumber":"0x3039"}]`,
+		}},
+		{"EVM case aliases", types.ProtoEthRPC, "eth_getBalance", [2]string{
+			`["0xabcd",{"blockNumber":"0x3039","BlockNumber":"0x3038"}]`,
+			`["0xabcd",{"BlockNumber":"0x3038","blockNumber":"0x3039"}]`,
+		}},
+		{"Comet duplicate page", types.ProtoRPC, "validators", [2]string{
+			`{"height":"12345","page":"2"}`,
+			`{"height":"12345","page":"1","page":"2"}`,
+		}},
+		{"Comet escaped duplicate page", types.ProtoRPC, "validators", [2]string{
+			`{"height":"12345","page":"2"}`,
+			`{"height":"12345","page":"1","\u0070age":"2"}`,
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rig := newResponseCacheRig(t, tc.protocol, `"unused"`)
+			// Model an upstream that distinguishes the original parameter
+			// bytes. It may reject duplicates or apply different name matching.
+			rig.reply.Store(`{"jsonrpc":"2.0","id":1,"result":"first request"}`)
+			rig.request(http.MethodPost, "/", cacheRPCRequest(tc.method, tc.params[0], `1`))
+			rig.reply.Store(`{"jsonrpc":"2.0","id":2,"result":"second request"}`)
+			out := rig.request(http.MethodPost, "/", cacheRPCRequest(tc.method, tc.params[1], `2`))
+			if got := out.Header().Get("x-stitch-cache"); got != "miss" {
+				t.Errorf("ambiguous params reused another request: cache=%q", got)
+			}
+			if result := assertResponseCacheID(t, out.Body.Bytes(), `2`); string(result) != `"second request"` {
+				t.Errorf("ambiguous params received another request's result: %s", result)
+			}
+			// Raw fallback still reuses identical ambiguous params across IDs.
+			out = rig.request(http.MethodPost, "/", cacheRPCRequest(tc.method, tc.params[1], `3`))
+			if got := out.Header().Get("x-stitch-cache"); got != "hit" {
+				t.Errorf("identical raw params did not reuse cache: %q", got)
+			}
+			assertResponseCacheID(t, out.Body.Bytes(), `3`)
+			if rig.hits.Load() != 2 || rig.cache.Size() != 2 {
+				t.Errorf("ambiguous params: upstream calls=%d entries=%d; want 2 each", rig.hits.Load(), rig.cache.Size())
+			}
+		})
+	}
+}
+
 func TestResponseCacheCometURIQueryIdentity(t *testing.T) {
 	rig := newResponseCacheRig(t, types.ProtoRPC, `"ok"`)
 	for _, tc := range []struct {

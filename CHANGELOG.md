@@ -69,6 +69,10 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Fixed
 
+- Ambiguous JSON parameters with repeated or case-equivalent object member
+  names retain their original bytes in response-cache keys, preserving member
+  order when upstream decoders can interpret those members differently.
+
 - EVM and CometBFT response caches now key canonical method parameters without
   the JSON-RPC ID and restore each caller's ID on cache hits. CometBFT URI keys
   include query parameters, preventing different queries from sharing results.
