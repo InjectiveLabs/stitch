@@ -7,6 +7,7 @@ import (
 	"hash/fnv"
 	"strconv"
 	"strings"
+	"unicode"
 )
 
 // BuildKey produces a canonical cache key for (protocol, method, height,
@@ -31,13 +32,15 @@ func BuildKey(protocol, method string, height int64, paramsHash uint64) string {
 // component); the hash covers the rest of params so two requests with
 // the same height but different addresses don't collide.
 //
-// Valid JSON is canonicalized: insignificant whitespace and object-key
-// order do not affect the hash, but positional argument order does. JSON
-// numbers retain their exact representation, including integers larger
-// than 2^53. Non-JSON input (such as an encoded URI query) is hashed as-is;
-// callers must keep those transports in separate key namespaces.
+// Unambiguous JSON is canonicalized: insignificant whitespace and object-key
+// order do not affect the hash, but positional argument order does. Objects
+// with repeated or case-fold-equivalent member names at any depth retain
+// their original bytes because upstream decoders may interpret their order
+// differently. JSON numbers retain their exact representation, including
+// integers larger than 2^53. Non-JSON input (such as an encoded URI query) is
+// hashed as-is; callers must keep those transports in separate namespaces.
 func HashParams(b []byte) uint64 {
-	if json.Valid(b) {
+	if json.Valid(b) && !hasAmbiguousObjectNames(b) {
 		dec := json.NewDecoder(bytes.NewReader(b))
 		dec.UseNumber()
 		var params any
@@ -50,6 +53,57 @@ func HashParams(b []byte) uint64 {
 	h := fnv.New64a()
 	_, _ = h.Write(b)
 	return h.Sum64()
+}
+
+// hasAmbiguousObjectNames scans already-valid JSON without decoding values.
+// Only object scopes need tracking: a quoted string followed by a colon is
+// necessarily a member name, even when objects appear inside nested arrays.
+func hasAmbiguousObjectNames(b []byte) bool {
+	var objects []map[string]struct{}
+	for pos := 0; pos < len(b); pos++ {
+		switch b[pos] {
+		case '{':
+			objects = append(objects, nil)
+		case '}':
+			objects[len(objects)-1] = nil
+			objects = objects[:len(objects)-1]
+		case '"':
+			end := jsonStringEnd(b, pos)
+			next := skipJSONSpace(b, end)
+			if next < len(b) && b[next] == ':' {
+				var name string
+				if err := json.Unmarshal(b[pos:end], &name); err != nil {
+					return true
+				}
+				name = foldMemberName(name)
+				names := objects[len(objects)-1]
+				if _, exists := names[name]; exists {
+					return true
+				}
+				if names == nil {
+					names = make(map[string]struct{})
+					objects[len(objects)-1] = names
+				}
+				names[name] = struct{}{}
+			}
+			pos = end - 1
+		}
+	}
+	return false
+}
+
+// Choose the smallest rune in each SimpleFold cycle so the comparison
+// matches Unicode case folding, including aliases such as Kelvin sign/K.
+func foldMemberName(name string) string {
+	return strings.Map(func(r rune) rune {
+		for {
+			next := unicode.SimpleFold(r)
+			if next <= r {
+				return next
+			}
+			r = next
+		}
+	}, name)
 }
 
 // HashParamsExcept hashes b but skips bytes that match the height value

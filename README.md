@@ -397,9 +397,12 @@ the entire response body keyed by `(protocol, method, height, params hash)`.
 JSON-RPC IDs are excluded from the key, and a cache hit returns the caller's
 ID without changing the result. Params are canonicalized so whitespace and
 object-key order do not create duplicate entries; positional argument order
-and numeric precision are preserved. CometBFT URI requests include their query
-parameters in a separate cache namespace. Notifications bypass the response
-cache, and only successful JSON-RPC responses are stored.
+and numeric precision are preserved. Objects with repeated member names,
+including case variants, retain their original bytes in the key because
+upstream decoders can interpret those members differently. CometBFT URI
+requests include their query parameters in a separate cache namespace.
+Notifications bypass the response cache, and only successful JSON-RPC responses
+are stored.
 
 Equivalent calls serve from local memory without upstream traffic. Entries
 live for `policies.cache.ttl` (default 5m). The response cache enforces both
