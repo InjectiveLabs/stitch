@@ -82,7 +82,7 @@ func (c *ResponseCache) Get(key string) ([]byte, bool) {
 
 // Set binds key to body with optional TTL. ttl ≤ 0 means no expiration.
 //
-// Bodies larger than MaxBytes (per-entry) are rejected to avoid one
+// Bodies larger than half of MaxBytes are rejected to avoid one
 // large response evicting everything else.
 func (c *ResponseCache) Set(key string, body []byte, ttl time.Duration) {
 	if key == "" || len(body) == 0 {
@@ -104,6 +104,7 @@ func (c *ResponseCache) Set(key string, body []byte, ttl time.Duration) {
 		old.expires = expiry(ttl)
 		c.bytesIn += int64(len(bodyCopy))
 		c.order.MoveToFront(elem)
+		c.evictUntilWithinBudget()
 		return
 	}
 

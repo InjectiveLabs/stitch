@@ -18,8 +18,12 @@ import (
 // request: the routing key + the (possibly buffered) body for replay on
 // retry by the forwarder.
 type decoded struct {
-	key  types.RouteKey
-	body []byte // pre-read POST body; nil for GET
+	key     types.RouteKey
+	body    []byte // pre-read POST body; nil for URI requests
+	params  json.RawMessage
+	id      json.RawMessage
+	version string
+	uri     bool
 }
 
 // JSON-RPC v2 envelope (incoming). params can be an object or an array.
@@ -55,15 +59,16 @@ func decodeURI(r *http.Request) decoded {
 	method := strings.TrimPrefix(r.URL.Path, "/")
 	method = strings.TrimSuffix(method, "/")
 	spec := Lookup(method)
-	q := r.URL.Query()
+	q, queryErr := url.ParseQuery(r.URL.RawQuery)
 
 	d := decoded{
+		uri: true,
 		key: types.RouteKey{
 			Protocol:   types.ProtoRPC,
 			Method:     method,
 			Class:      spec.Class,
 			Idempotent: spec.Idempotent,
-			Cacheable:  spec.Cacheable,
+			Cacheable:  spec.Cacheable && queryErr == nil,
 		},
 	}
 	if spec.HeightParam != "" {
@@ -116,7 +121,10 @@ func decodeJSONRPC(r *http.Request) (decoded, error) {
 	}
 	spec := Lookup(req.Method)
 	d := decoded{
-		body: body,
+		body:    body,
+		params:  req.Params,
+		id:      req.ID,
+		version: req.JSONRPC,
 		key: types.RouteKey{
 			Protocol:   types.ProtoRPC,
 			Method:     req.Method,

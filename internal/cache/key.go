@@ -1,7 +1,9 @@
 package cache
 
 import (
+	"bytes"
 	"encoding/binary"
+	"encoding/json"
 	"hash/fnv"
 	"strconv"
 	"strings"
@@ -29,11 +31,22 @@ func BuildKey(protocol, method string, height int64, paramsHash uint64) string {
 // component); the hash covers the rest of params so two requests with
 // the same height but different addresses don't collide.
 //
-// The hash is order-sensitive on JSON byte content. For methods where
-// param order matters semantically (like positional args in EVM JSON-RPC)
-// this is correct. For object-form params it's good-enough; clients
-// don't shuffle keys between requests in practice.
+// Valid JSON is canonicalized: insignificant whitespace and object-key
+// order do not affect the hash, but positional argument order does. JSON
+// numbers retain their exact representation, including integers larger
+// than 2^53. Non-JSON input (such as an encoded URI query) is hashed as-is;
+// callers must keep those transports in separate key namespaces.
 func HashParams(b []byte) uint64 {
+	if json.Valid(b) {
+		dec := json.NewDecoder(bytes.NewReader(b))
+		dec.UseNumber()
+		var params any
+		if err := dec.Decode(&params); err == nil {
+			if canonical, err := json.Marshal(params); err == nil {
+				b = canonical
+			}
+		}
+	}
 	h := fnv.New64a()
 	_, _ = h.Write(b)
 	return h.Sum64()

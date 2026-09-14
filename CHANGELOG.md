@@ -69,6 +69,15 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Fixed
 
+- EVM and CometBFT response caches now key canonical method parameters without
+  the JSON-RPC ID and restore each caller's ID on cache hits. CometBFT URI keys
+  include query parameters, preventing different queries from sharing results.
+  Notifications and unsuccessful JSON-RPC responses bypass cache admission.
+- Growing replacements now enforce the response cache's byte and entry limits.
+  Invalid or overflowing `policies.cache.l1_size_mb` values are rejected instead
+  of silently disabling the byte bound. Regression and load tests cover cache
+  reuse, response IDs, replacement eviction, and retained-memory stability.
+
 - Circuit accounting now reflects what clients actually experienced: an
   upstream HTTP 500 relayed to the client records a circuit failure
   (previously counted as success), a response truncated mid-body by the

@@ -192,7 +192,7 @@ func TestValidateHedgingAndCacheBounds(t *testing.T) {
 				Circuit:  CircuitPolicy{ErrorThreshold: 0.5, MinRequests: 1, OpenDuration: time.Second},
 				Health:   HealthPolicy{ProbeInterval: time.Second},
 				Hedging:  HedgingPolicy{Enabled: true, HedgeAfter: 200 * time.Millisecond},
-				Cache:    CachePolicy{Enabled: true, TTL: time.Minute, HashIndexEntries: 10, ResponseEntries: 10},
+				Cache:    CachePolicy{Enabled: true, TTL: time.Minute, HashIndexEntries: 10, ResponseEntries: 10, L1SizeMB: 1},
 			},
 		}
 	}
@@ -231,7 +231,7 @@ func TestValidateHedgingAndCacheBounds(t *testing.T) {
 	// regardless of cache.enabled).
 	cfg := base()
 	cfg.Policies.Hedging = HedgingPolicy{}
-	cfg.Policies.Cache = CachePolicy{HashIndexEntries: 10, ResponseEntries: 10}
+	cfg.Policies.Cache = CachePolicy{HashIndexEntries: 10, ResponseEntries: 10, L1SizeMB: 1}
 	if err := Validate(cfg); err != nil {
 		t.Fatalf("disabled hedging/zero-ttl cache should pass with sane capacities: %v", err)
 	}

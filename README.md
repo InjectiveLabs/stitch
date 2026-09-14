@@ -250,7 +250,7 @@ policies:
     ttl: 5m                            # response-cache entry lifetime (default 5m)
     hash_index_entries: 100000         # hash → height index capacity (default 100000)
     response_entries: 50000            # response-cache entry capacity (default 50000)
-    l1_size_mb: 1024                   # in-process LRU byte budget
+    l1_size_mb: 1024                   # retained response-body budget in MiB (default 1024)
   health:
     probe_interval: 5s                 # how often to probe each backend
     max_lag_blocks: 50                 # trip out backends lagging head by N
@@ -394,10 +394,33 @@ decision against the right shard.
 
 For finalized reads (height ≤ head − confirmation_depth), stitch caches
 the entire response body keyed by `(protocol, method, height, params hash)`.
-The next identical call serves from local memory in ~350 ns with no
-upstream traffic. Entries live for `policies.cache.ttl` (default 5m);
-capacities are bounded by `policies.cache.response_entries` and
-`policies.cache.hash_index_entries`.
+JSON-RPC IDs are excluded from the key, and a cache hit returns the caller's
+ID without changing the result. Params are canonicalized so whitespace and
+object-key order do not create duplicate entries; positional argument order
+and numeric precision are preserved. CometBFT URI requests include their query
+parameters in a separate cache namespace. Notifications bypass the response
+cache, and only successful JSON-RPC responses are stored.
+
+Equivalent calls serve from local memory without upstream traffic. Entries
+live for `policies.cache.ttl` (default 5m). The response cache enforces both
+`policies.cache.response_entries` and `policies.cache.l1_size_mb` on insertions
+and replacements, evicting least recently used entries as needed. Responses
+larger than half the byte budget are not admitted. `l1_size_mb` defaults to
+1024 MiB; negative values and values that overflow the byte conversion are
+rejected. The hash-to-height index has its own `policies.cache.hash_index_entries`
+capacity.
+
+The byte budget counts retained response bodies. Cache metadata, active
+requests, response copies, and other Go heap allocations consume additional
+memory; the budget is not a process or container memory limit.
+
+The cache regression tests include concurrent replacements and repeated
+128 KiB responses with changing IDs, checking hit rate and post-GC heap growth:
+
+```sh
+go test -mod=readonly -race -run 'ResponseCache|ResponseWithID|HashParams' ./internal/cache ./test/integration
+go test -mod=readonly -run '^$' -bench '^BenchmarkResponseWithID$' -benchmem ./internal/cache
+```
 
 ## Operations
 
