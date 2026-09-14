@@ -94,7 +94,8 @@ type CircuitPolicy struct {
 
 // CachePolicy tunes the response cache and the hash→height index. TTL is
 // the lifetime of response-cache entries; HashIndexEntries and
-// ResponseEntries cap the two caches' entry counts.
+// ResponseEntries cap the two caches' entry counts. L1SizeMB bounds retained
+// response-body bytes in MiB, separately from cache metadata and in-flight work.
 type CachePolicy struct {
 	Enabled           bool          `yaml:"enabled"`
 	ConfirmationDepth int64         `yaml:"confirmation_depth"`

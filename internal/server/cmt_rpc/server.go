@@ -108,25 +108,48 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Response-cache fast path on cacheable + height-keyed reads.
-	if s.respCache != nil && d.key.Cacheable && d.key.Idempotent && d.key.Class == types.ClassByHeight {
+	// Notifications must reach the upstream without receiving another
+	// caller's cached result. URI calls have no caller-selected JSON-RPC ID.
+	// A URI POST body may contain form parameters, so only cache bodyless
+	// URI requests whose complete parameters are available in the URL.
+	cacheRequest := (!d.uri && d.version == "2.0" && cache.IsJSONRPCID(d.id)) || (d.uri && r.ContentLength == 0)
+	if s.respCache != nil && cacheRequest && d.key.Cacheable && d.key.Idempotent && d.key.Class == types.ClassByHeight {
 		height := d.key.HeightOrZero()
 		var head int64
 		if s.head != nil {
 			head = s.head()
 		}
 		if cache.IsCacheableHeight(height, head, s.confDepth) {
-			cacheKey := cache.BuildKey(string(d.key.Protocol), d.key.Method, height, cache.HashParams(d.body))
+			protocol := string(d.key.Protocol)
+			params := []byte(d.params)
+			if d.uri {
+				// Encode sorts query keys while preserving repeated-value order.
+				// Keep URI and JSON-RPC responses in separate namespaces.
+				protocol += ":uri:" + r.Method
+				params = []byte(r.URL.Query().Encode())
+			}
+			cacheKey := cache.BuildKey(protocol, d.key.Method, height, cache.HashParams(params))
 			if hit, ok := s.respCache.Get(cacheKey); ok {
-				w.Header().Set("content-type", "application/json")
-				w.Header().Set("x-stitch-cache", "hit")
-				_, _ = w.Write(hit)
-				return
+				response := hit
+				var valid bool
+				if d.uri {
+					valid = cache.IsSuccessfulResponse(hit)
+				} else {
+					response, valid = cache.ResponseWithID(hit, d.id)
+				}
+				if valid {
+					w.Header().Set("content-type", "application/json")
+					w.Header().Set("x-stitch-cache", "hit")
+					// #nosec G705 -- Validated JSON-RPC is served as application/json.
+					_, _ = w.Write(response)
+					return
+				}
 			}
 			cap := server.NewCapture(w.Header())
 			cap.Header().Set("x-stitch-cache", "miss")
 			dispatch(cap, r, d.key)
 			cap.FlushTo(w)
-			if cap.Status() >= 200 && cap.Status() < 300 {
+			if cap.Status() >= 200 && cap.Status() < 300 && cache.IsSuccessfulResponse(cap.BodyBytes()) {
 				s.respCache.Set(cacheKey, cap.BodyBytes(), s.cacheTTL)
 			}
 			if s.cache != nil && cmtPopulatable(d.key.Method) {

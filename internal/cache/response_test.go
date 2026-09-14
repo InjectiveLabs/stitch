@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"bytes"
 	"strconv"
 	"sync"
 	"testing"
@@ -10,6 +11,86 @@ import (
 
 	"github.com/InjectiveLabs/stitch/internal/metrics"
 )
+
+func TestResponseCacheReplacementBudget(t *testing.T) {
+	c := NewResponseCache(ResponseCacheOpts{Capacity: 4, MaxBytes: 100})
+	for _, key := range []string{"a", "b", "c", "d"} {
+		c.Set(key, bytes.Repeat([]byte(key), 25), 0)
+	}
+	// Growing an existing key must evict the oldest other entry, exactly as
+	// insertion does; previously replacement returned before budget eviction.
+	c.Set("a", bytes.Repeat([]byte("A"), 50), 0)
+	if got := c.Bytes(); got != 100 {
+		t.Errorf("bytes after growing replacement = %d; want 100", got)
+	}
+	if got := c.Size(); got != 3 {
+		t.Errorf("size after growing replacement = %d; want 3", got)
+	}
+	if _, ok := c.Get("b"); ok {
+		t.Error("oldest untouched entry b survived budget eviction")
+	}
+	if got, ok := c.Get("a"); !ok || !bytes.Equal(got, bytes.Repeat([]byte("A"), 50)) {
+		t.Errorf("replacement not retained: %q, %v", got, ok)
+	}
+
+	c.Set("a", []byte("small"), 0)
+	if got := c.Bytes(); got != 55 {
+		t.Errorf("bytes after shrinking replacement = %d; want 55", got)
+	}
+	c.Set("a", make([]byte, 51), 0) // Existing half-budget admission limit.
+	if got, ok := c.Get("a"); !ok || string(got) != "small" {
+		t.Errorf("oversized replacement changed existing value: %q, %v", got, ok)
+	}
+	if got := c.Bytes(); got != 55 {
+		t.Errorf("rejected replacement changed byte accounting: %d", got)
+	}
+	c.Delete("a")
+	if got := c.Bytes(); got != 50 {
+		t.Errorf("bytes after deleting replacement = %d; want 50", got)
+	}
+}
+
+func TestResponseCacheConcurrentReplacementBounds(t *testing.T) {
+	const capacity, budget = 16, 16 * 1024
+	c := NewResponseCache(ResponseCacheOpts{Capacity: capacity, MaxBytes: budget})
+	var wg sync.WaitGroup
+	for worker := 0; worker < 8; worker++ {
+		wg.Add(1)
+		go func(worker int) {
+			defer wg.Done()
+			for i := 0; i < 300; i++ {
+				key := strconv.Itoa((worker + i) % 24)
+				// Includes shrinking, growing, and rejected oversized writes.
+				size := []int{128, 1024, 4096, 8193}[i%4]
+				body := bytes.Repeat([]byte{byte(i)}, size)
+				c.Set(key, body, 0)
+				body[0] ^= 0xff // Caller retains ownership after Set.
+				if got, ok := c.Get(key); ok {
+					got[0] ^= 0xff // Get must also return an independent copy.
+				}
+				if got := c.Size(); got > capacity {
+					t.Errorf("capacity exceeded during concurrent load: %d", got)
+					return
+				}
+				if got := c.Bytes(); got > budget || got < 0 {
+					t.Errorf("byte budget exceeded during concurrent load: %d", got)
+					return
+				}
+			}
+		}(worker)
+	}
+	wg.Wait()
+	// Verify accounting against retained bodies, not just the counter.
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var retained int64
+	for _, elem := range c.entries {
+		retained += int64(len(elem.Value.(*cacheEntry).body))
+	}
+	if retained != c.bytesIn || len(c.entries) != c.order.Len() {
+		t.Errorf("retained bytes=%d, accounted=%d, entries=%d, LRU=%d", retained, c.bytesIn, len(c.entries), c.order.Len())
+	}
+}
 
 func TestResponseCacheBasic(t *testing.T) {
 	c := NewResponseCache(ResponseCacheOpts{Capacity: 4})

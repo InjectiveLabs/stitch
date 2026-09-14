@@ -158,7 +158,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 //     unsupported subscribe over HTTP).
 //   - otherwise: forward via the HTTP forwarder, replaying body if needed.
 func (s *Server) handleSingle(w http.ResponseWriter, r *http.Request, body []byte) {
-	d, _, err := decodeOne(s.manifest, body)
+	d, req, err := decodeOne(s.manifest, body)
 	if err != nil {
 		writeRawError(w, http.StatusBadRequest, -32700, "parse: "+err.Error())
 		return
@@ -200,26 +200,28 @@ func (s *Server) handleSingle(w http.ResponseWriter, r *http.Request, body []byt
 
 	// Response-cache fast path: if this is a cacheable, height-keyed,
 	// idempotent read at a finalized height, try the cache first.
-	if s.respCache != nil && d.key.Cacheable && d.key.Idempotent && d.key.Class == types.ClassByHeight {
+	if s.respCache != nil && req.JSONRPC == "2.0" && cache.IsJSONRPCID(d.id) && d.key.Cacheable && d.key.Idempotent && d.key.Class == types.ClassByHeight {
 		height := d.key.HeightOrZero()
 		var head int64
 		if s.head != nil {
 			head = s.head()
 		}
 		if cache.IsCacheableHeight(height, head, s.confDepth) {
-			cacheKey := cache.BuildKey(string(d.key.Protocol), d.method, height, cache.HashParams(body))
+			cacheKey := cache.BuildKey(string(d.key.Protocol), d.method, height, cache.HashParams(req.Params))
 			if hit, ok := s.respCache.Get(cacheKey); ok {
-				w.Header().Set("content-type", "application/json")
-				w.Header().Set("x-stitch-cache", "hit")
-				_, _ = w.Write(hit)
-				return
+				if response, ok := cache.ResponseWithID(hit, d.id); ok {
+					w.Header().Set("content-type", "application/json")
+					w.Header().Set("x-stitch-cache", "hit")
+					_, _ = w.Write(response)
+					return
+				}
 			}
 			// Miss — capture, forward, populate.
 			cap := server.NewCapture(w.Header())
 			cap.Header().Set("x-stitch-cache", "miss")
 			dispatch(cap, r.WithContext(ctx), d.key)
 			cap.FlushTo(w)
-			if cap.Status() >= 200 && cap.Status() < 300 {
+			if cap.Status() >= 200 && cap.Status() < 300 && cache.IsSuccessfulResponse(cap.BodyBytes()) {
 				s.respCache.Set(cacheKey, cap.BodyBytes(), s.cacheTTL)
 			}
 			if s.cache != nil && shouldPopulateCache(d.method) {

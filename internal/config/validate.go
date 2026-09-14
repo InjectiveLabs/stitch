@@ -157,6 +157,9 @@ func validatePolicies(p PoliciesConfig) error {
 	if p.Cache.ResponseEntries < 1 {
 		return errors.New("policies.cache.response_entries must be ≥ 1")
 	}
+	if p.Cache.L1SizeMB < 1 || int64(p.Cache.L1SizeMB) > (1<<63-1)/(1024*1024) {
+		return errors.New("policies.cache.l1_size_mb must be ≥ 1 and fit in an int64 byte budget")
+	}
 	switch p.Cache.L2Kind {
 	case "", "none", "redis":
 	default:
