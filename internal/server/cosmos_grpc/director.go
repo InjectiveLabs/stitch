@@ -100,8 +100,11 @@ func NewDirector(s selector.Selector, c *circuit.Manager, p *pool.GRPCPool) *Dir
 // streamHandler, which installs the chosen-backend slot it reports
 // through.
 func (d *Director) Direct(ctx context.Context, fullMethodName string) (context.Context, *grpc.ClientConn, error) {
-	rid := runtime.NewRequestID()
-	ctx = log.WithRequestID(ctx, rid)
+	rid := log.RequestID(ctx)
+	if rid == "" {
+		rid = runtime.NewRequestID()
+		ctx = log.WithRequestID(ctx, rid)
+	}
 	ctx = log.WithProtocol(ctx, string(types.ProtoGRPC))
 	ctx = log.WithMethod(ctx, fullMethodName)
 
@@ -111,7 +114,7 @@ func (d *Director) Direct(ctx context.Context, fullMethodName string) (context.C
 
 	candidates := d.selector.Candidates(key)
 	if len(candidates) == 0 {
-		log.FromCtx(ctx).Warn("grpc: no eligible candidates", "method", fullMethodName)
+		log.FromCtx(ctx).Warn("grpc: no eligible candidates", "class", key.Class.String(), "height", key.HeightOrZero())
 		metrics.RequestsTotal.WithLabelValues(string(types.ProtoGRPC), key.Class.String(), "-", "no_candidates").Inc()
 		return ctx, nil, status.Error(codes.Unavailable, "no eligible backend")
 	}
@@ -129,6 +132,9 @@ func (d *Director) Direct(ctx context.Context, fullMethodName string) (context.C
 		}
 		conn, err := d.pool.Conn(ctx, b.Name, pool.CleanAddr(ep))
 		if err != nil {
+			// The pool uses non-blocking DialContext: synchronous errors are
+			// connection setup failures, not caller cancellation. RPC outcomes
+			// on an established ClientConn are classified by streamHandler.
 			d.circuit.Record(b.Name, types.ProtoGRPC, false)
 			log.FromCtx(ctx).Warn("grpc: dial failed", "backend", b.Name, "err", err.Error())
 			metrics.FailoverAttempts.WithLabelValues(b.Name, "next", "dial").Inc()
@@ -152,7 +158,7 @@ func (d *Director) Direct(ctx context.Context, fullMethodName string) (context.C
 		return out, conn, nil
 	}
 
-	log.FromCtx(ctx).Error("grpc: all candidates exhausted", "method", fullMethodName)
+	log.FromCtx(ctx).Error("grpc: all candidates exhausted", "class", key.Class.String(), "height", key.HeightOrZero())
 	metrics.RequestsTotal.WithLabelValues(string(types.ProtoGRPC), key.Class.String(), "-", "all_failed").Inc()
 	return ctx, nil, status.Error(codes.Unavailable, "all candidates failed")
 }
@@ -169,8 +175,8 @@ func (d *Director) RecordOutcome(backend string, success bool) {
 
 // ReleaseOutcome abandons the admission claimed in Direct without
 // recording a sample — for RPCs whose outcome says nothing about the
-// backend (the client vanished mid-stream). Frees a claimed half-open
-// canary slot; mirrors the forwarder's Release convention.
+// backend (application status errors or early caller cancellation). Frees a
+// claimed half-open canary slot; mirrors the forwarder's Release convention.
 func (d *Director) ReleaseOutcome(backend string) {
 	if backend == "" {
 		return

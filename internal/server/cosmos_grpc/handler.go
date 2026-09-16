@@ -2,14 +2,20 @@ package cosmos_grpc
 
 import (
 	"context"
-	"errors"
 	"fmt"
+	"log/slog"
+	"time"
 
 	"github.com/mwitkow/grpc-proxy/proxy"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/emptypb"
+
+	"github.com/InjectiveLabs/stitch/internal/log"
+	"github.com/InjectiveLabs/stitch/internal/runtime"
+	"github.com/InjectiveLabs/stitch/internal/types"
 )
 
 // streamHandler wraps proxy.TransparentHandler so we can:
@@ -19,23 +25,27 @@ import (
 //     claimed in Direct with the actual RPC outcome.
 //
 // Without this, only dial failures trip the breaker; an upstream that
-// successfully accepts the connection but errors on every call would never
-// be circuit-protected. A set slot means Direct committed to a backend and
-// holds an admission, so exactly one resolution — Record or Release —
+// successfully accepts the connection but returns availability failures
+// would never be circuit-protected. Application status errors are neutral
+// because the breaker is shared by every method on that backend. A set slot
+// means Direct committed to a backend and holds an admission, so exactly
+// one resolution — Record or Release —
 // happens here.
 func streamHandler(dir *Director) grpc.StreamHandler {
 	inner := proxy.TransparentHandler(dir.Direct)
 	return func(srv any, ss grpc.ServerStream) error {
+		started := time.Now()
 		slot := &atomicString{}
-		_, hadDeadline := ss.Context().Deadline()
-		ctx := context.WithValue(ss.Context(), chosenBackendKey, slot)
+		ctx := log.WithRequestID(ss.Context(), runtime.NewRequestID())
+		ctx = context.WithValue(ctx, chosenBackendKey, slot)
 		wrapped := &slotStream{ServerStream: ss, ctx: ctx}
+		method, hasMethod := grpc.MethodFromServerStream(ss)
 
 		// The proxy director normally runs before RecvMsg, so it cannot see
 		// request fields. For manifest-declared height queries, receive the
 		// first frame now, extract its routing height, and replay the exact
 		// protobuf payload when mwitkow starts its normal forwarding loop.
-		if method, ok := grpc.MethodFromServerStream(ss); ok {
+		if hasMethod {
 			md, _ := metadata.FromIncomingContext(ss.Context())
 			_, hasMetadataHeight := metadataHeight(md)
 			if _, bodyRoutable := Lookup(method); bodyRoutable && !hasMetadataHeight {
@@ -53,20 +63,28 @@ func streamHandler(dir *Director) grpc.StreamHandler {
 		}
 		err := inner(srv, wrapped)
 		if name := slot.Get(); name != "" {
-			switch {
-			case err == nil:
+			outcome := classifyRPCOutcome(ss.Context(), err)
+			switch outcome {
+			case rpcSuccess:
 				dir.RecordOutcome(name, true)
-			case errors.Is(ss.Context().Err(), context.Canceled) && !hadDeadline:
-				// Convention (mirrors forwarder/broadcast.go drainResults):
-				//   cancellation  = client walked away, neutral Release;
-				//   deadline expiry = backend too slow, recorded failure.
-				// Some grpc-go paths surface a client deadline as
-				// context.Canceled on the server stream, so a request with a
-				// caller-supplied deadline is treated as part of the backend's
-				// service budget rather than a neutral disconnect.
-				dir.ReleaseOutcome(name)
-			default:
+			case rpcFailure:
 				dir.RecordOutcome(name, false)
+			case rpcNeutral:
+				dir.ReleaseOutcome(name)
+			}
+			if log.L().Enabled(wrapped.ctx, slog.LevelDebug) {
+				md, _ := metadata.FromIncomingContext(wrapped.ctx)
+				key := buildRouteKey(method, md, requestHeight(wrapped.ctx))
+				log.FromCtx(wrapped.ctx).Debug("grpc: RPC outcome",
+					"backend", name,
+					"protocol", string(types.ProtoGRPC),
+					"method", method,
+					"class", key.Class.String(),
+					"height", key.HeightOrZero(),
+					"grpc_status", status.Code(err).String(),
+					"outcome", string(outcome),
+					"duration_ms", time.Since(started).Milliseconds(),
+				)
 			}
 		}
 		return err

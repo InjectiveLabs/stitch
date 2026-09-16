@@ -13,10 +13,12 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/health"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/emptypb"
@@ -848,14 +850,8 @@ func (h *hangingHealthServer) Check(ctx context.Context, _ *healthpb.HealthCheck
 // helpers --------------------------------------------------------------
 
 func grpcUnavailable(msg string) error {
-	// Use a generic error that the gRPC server will translate to
-	// codes.Unknown — sufficient for the failover test.
-	return &gErr{msg: msg}
+	return status.Error(codes.Unavailable, msg)
 }
-
-type gErr struct{ msg string }
-
-func (e *gErr) Error() string { return "rpc: " + e.msg }
 
 // Sanity helper for IDE: ensure we reference these constants so the test
 // file links cleanly even if the test names refactor.
