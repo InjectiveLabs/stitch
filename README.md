@@ -330,6 +330,20 @@ same historical store version. Unknown methods remain transparent and route
 as latest unless metadata is supplied; stitch deliberately does not guess from
 unrelated fields such as proof heights or range-filter heights.
 
+#### Cosmos gRPC circuit outcomes
+
+The gRPC circuit is shared by methods on each backend. Successful calls count
+as successes; `Unavailable`, `DeadlineExceeded`, and expired caller deadlines
+count as failures. Other gRPC statuses, including `Internal` and `Unknown`,
+release the admission without changing the failure window. These statuses can
+represent application errors: a failed transaction trace must not make valid
+balance queries unavailable. The original status is still returned to the caller.
+
+Caller cancellation before its deadline is also neutral. A neutral result in
+half-open state frees the probe slot so another call can test recovery. Debug
+outcome logs include the request ID, backend, method, status, route class, and
+height; request payloads and upstream error messages are omitted.
+
 ### Subscription resume
 
 When a client opens an `eth_subscribe newHeads`, stitch:
