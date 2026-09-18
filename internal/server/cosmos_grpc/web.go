@@ -122,8 +122,9 @@ func (s *Server) WebHandler(opts WebOptions, fallback http.Handler) http.Handler
 		// preflights without x-grpc-web use the same explicit origin policy.
 		wrapped.HandleGrpcWebRequest(w, r)
 	})
-	withCORS := corsHandler.Handler(route)
+	withCORS := corsHandler.Handler(authoritativeWebCORS(route))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		clearWebCORSHeaders(w.Header())
 		if origin := r.Header.Get("Origin"); origin != "" && !allowedOrigin(origin) {
 			w.Header().Add("Vary", "Origin")
 			http.Error(w, "origin is not allowed", http.StatusForbidden)
