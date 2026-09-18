@@ -259,3 +259,14 @@ func assertRange(t *testing.T, d decoded, lower, upper int64) {
 		t.Fatalf("upper: %v", d.key.Range.Upper)
 	}
 }
+
+func TestDecodeJSONRPCABCIHeightArray(t *testing.T) {
+	r := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"abci_query","params":["/store/bank/key","ABCD","75",false]}`))
+	d, err := decode(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.key.Class != types.ClassByHeight || d.key.HeightOrZero() != 75 {
+		t.Fatalf("ABCI positional height was not routed historically: %+v", d.key)
+	}
+}

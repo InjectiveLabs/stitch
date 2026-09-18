@@ -15,15 +15,25 @@ type Config struct {
 // ListenConfig groups the addresses for every protocol listener.
 // An empty Addr means the listener is disabled.
 type ListenConfig struct {
-	RPC         AddrConfig `yaml:"rpc"`
-	GRPC        AddrConfig `yaml:"grpc"`
-	API         AddrConfig `yaml:"api"`
-	EthRPC      AddrConfig `yaml:"eth_rpc"`
-	EthWS       AddrConfig `yaml:"eth_ws"`
-	ChainStream AddrConfig `yaml:"chainstream"`
-	InjWS       AddrConfig `yaml:"inj_ws"`
-	Admin       AddrConfig `yaml:"admin"`
+	RPC         AddrConfig    `yaml:"rpc"`
+	GRPC        AddrConfig    `yaml:"grpc"`
+	GRPCWeb     GRPCWebConfig `yaml:"grpc_web"`
+	API         AddrConfig    `yaml:"api"`
+	EthRPC      AddrConfig    `yaml:"eth_rpc"`
+	EthWS       AddrConfig    `yaml:"eth_ws"`
+	ChainStream AddrConfig    `yaml:"chainstream"`
+	InjWS       AddrConfig    `yaml:"inj_ws"`
+	Admin       AddrConfig    `yaml:"admin"`
 }
+
+// GRPCWebConfig enables an optional browser-compatible listener with REST fallback.
+// Origin access is explicit; an empty list rejects cross-origin browser calls.
+type GRPCWebConfig struct {
+	Addr           string   `yaml:"addr"`
+	AllowedOrigins []string `yaml:"allowed_origins,omitempty"`
+}
+
+func (g GRPCWebConfig) Enabled() bool { return g.Addr != "" }
 
 // AddrConfig is a listen address with optional TLS. An empty Addr disables
 // the listener it belongs to.

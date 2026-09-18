@@ -134,7 +134,7 @@ func decodeJSONRPC(r *http.Request) (decoded, error) {
 		},
 	}
 	if spec.HeightParam != "" {
-		if hs := paramFromJSON(req.Params, spec.HeightParam, 0); hs != "" {
+		if hs := paramFromJSON(req.Params, spec.HeightParam, spec.HeightIndex); hs != "" {
 			if h, ok := parseHeight(hs); ok {
 				d.key.Height = &h
 				d.key.Class = types.ClassByHeight

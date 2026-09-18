@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -81,13 +82,25 @@ func (a *atomicString) Get() string {
 // retried after partial response delivery; failover only applies before
 // the first message lands. Phase 5's subscription hub adds proper resume.
 type Director struct {
-	selector selector.Selector
-	circuit  *circuit.Manager
-	pool     *pool.GRPCPool
+	selector          selector.Selector
+	circuit           *circuit.Manager
+	pool              *pool.GRPCPool
+	maxAttempts       int
+	perAttemptTimeout time.Duration
 }
 
 func NewDirector(s selector.Selector, c *circuit.Manager, p *pool.GRPCPool) *Director {
-	return &Director{selector: s, circuit: c, pool: p}
+	return &Director{selector: s, circuit: c, pool: p, maxAttempts: 3, perAttemptTimeout: 5 * time.Second}
+}
+
+// SetFailoverPolicy configures historical-query attempts before serving starts.
+func (d *Director) SetFailoverPolicy(maxAttempts int, timeout time.Duration) {
+	if maxAttempts > 0 {
+		d.maxAttempts = maxAttempts
+	}
+	if timeout > 0 {
+		d.perAttemptTimeout = timeout
+	}
 }
 
 // Direct chooses an upstream for fullMethodName. Returns the modified

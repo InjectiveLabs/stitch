@@ -10,6 +10,9 @@ func Validate(c *Config) error {
 	if c == nil {
 		return errors.New("nil config")
 	}
+	if c.Listen.GRPCWeb.Enabled() && !c.Listen.GRPC.Enabled() {
+		return errors.New("listen.grpc_web requires listen.grpc")
+	}
 	if err := validateLog(c.Log); err != nil {
 		return err
 	}

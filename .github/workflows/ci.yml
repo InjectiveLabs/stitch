@@ -44,6 +44,9 @@ jobs:
       - name: test
         run: go test -mod=readonly -timeout=5m ./...
 
+      - name: historical method generator tests
+        run: python3 -m unittest discover -s tools -p test_generate_history_methods.py
+
   race:
     name: race detector
     runs-on: ubuntu-latest

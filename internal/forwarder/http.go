@@ -92,6 +92,7 @@ func (f *HTTP) Forward(w http.ResponseWriter, r *http.Request, key types.RouteKe
 	}
 
 	var lastErr error
+	var lastHistorical *retainedResponse
 	attempts := 0
 	for _, b := range candidates {
 		// Client gone: nothing we write will be read. Stop attempting and
@@ -134,6 +135,7 @@ func (f *HTTP) Forward(w http.ResponseWriter, r *http.Request, key types.RouteKe
 		if err != nil {
 			cancel()
 			lastErr = err
+			lastHistorical = nil
 			f.circuit.Record(b.Name, key.Protocol, false)
 			continue
 		}
@@ -169,7 +171,17 @@ func (f *HTTP) Forward(w http.ResponseWriter, r *http.Request, key types.RouteKe
 			continue
 		}
 
+		if missing := historicalError(resp, key); missing != nil {
+			lastHistorical = missing
+			lastErr = fmt.Errorf("historical state unavailable on %s", b.Name)
+			_ = resp.Body.Close()
+			cancel()
+			f.circuit.Release(b.Name, key.Protocol)
+			metrics.FailoverAttempts.WithLabelValues(b.Name, "next", "missing_state").Inc()
+			continue
+		}
 		if shouldRetryStatus(resp.StatusCode, key) {
+			lastHistorical = nil
 			lastErr = fmt.Errorf("upstream status %d", resp.StatusCode)
 			_ = resp.Body.Close()
 			cancel()
@@ -226,6 +238,13 @@ func (f *HTTP) Forward(w http.ResponseWriter, r *http.Request, key types.RouteKe
 		return
 	}
 
+	if lastHistorical != nil {
+		copyHeaders(w.Header(), lastHistorical.header)
+		w.WriteHeader(lastHistorical.status)
+		_, _ = w.Write(lastHistorical.body)
+		metrics.RequestsTotal.WithLabelValues(string(key.Protocol), key.Class.String(), "-", "history_unavailable").Inc()
+		return
+	}
 	if lastErr == nil {
 		lastErr = ErrNoCandidates
 	}

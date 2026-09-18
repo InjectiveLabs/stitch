@@ -63,3 +63,4 @@ docker-compose.override.yaml
 *.test.bin
 *.tmp
 testdata.local/
+__pycache__/

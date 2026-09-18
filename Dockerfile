@@ -17,6 +17,6 @@ RUN go build -mod=readonly -trimpath \
 FROM gcr.io/distroless/base-debian12:nonroot
 COPY --from=build /out/stitch /usr/local/bin/stitch
 USER nonroot:nonroot
-EXPOSE 5001 5002 5003 5005 5006 5007 5008 9091
+EXPOSE 5001 5002 5003 5004 5005 5006 5007 5008 9091
 ENTRYPOINT ["/usr/local/bin/stitch"]
 CMD ["start", "--config", "/etc/stitch/config.yaml"]
