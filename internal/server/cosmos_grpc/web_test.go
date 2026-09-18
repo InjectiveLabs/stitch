@@ -247,7 +247,7 @@ func newWebBackend(t *testing.T, opts WebOptions, fallback http.Handler, handler
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = front.lis.Close(); front.srv.Stop() })
-	httpServer := httptest.NewServer(front.WebHandler(opts, fallback))
+	httpServer := httptest.NewServer(h2c.NewHandler(front.WebHandler(opts, fallback), &http2.Server{}))
 	httpServer.Client().Timeout = 4 * time.Second
 	t.Cleanup(httpServer.Close)
 	return httpServer
