@@ -61,6 +61,13 @@ func streamHandler(dir *Director) grpc.StreamHandler {
 				}
 			}
 		}
+		if hasMethod {
+			md, _ := metadata.FromIncomingContext(wrapped.ctx)
+			key := buildRouteKey(method, md, requestHeight(wrapped.ctx))
+			if key.Class == types.ClassByHeight && key.Idempotent && historicalReadMethod(method) {
+				return dir.forwardHistorical(wrapped, method, key)
+			}
+		}
 		err := inner(srv, wrapped)
 		if name := slot.Get(); name != "" {
 			outcome := classifyRPCOutcome(ss.Context(), err)

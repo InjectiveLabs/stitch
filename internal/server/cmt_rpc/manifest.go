@@ -8,6 +8,7 @@ type MethodSpec struct {
 	Name           string
 	Class          types.MethodClass
 	HeightParam    string // param name for height (uri+json-rpc)
+	HeightIndex    int    // position of height in JSON-RPC array params
 	HashParam      string // param name for hash
 	HeightOptional bool   // if true, treat absent height as latest
 	Idempotent     bool
@@ -45,6 +46,7 @@ var Manifest = func() map[string]MethodSpec {
 	add(MethodSpec{
 		Name:           "abci_query",
 		HeightParam:    "height",
+		HeightIndex:    2, // path, data, height, prove
 		HeightOptional: true,
 		Idempotent:     true,
 		Cacheable:      true,

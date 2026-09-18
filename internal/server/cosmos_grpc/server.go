@@ -9,8 +9,9 @@
 //     failover-by-redial).
 //   - Reuses pooled *grpc.ClientConn per backend with idle eviction.
 //
+// WebHandler optionally exposes the same proxy over gRPC-Web.
+//
 // What is deferred:
-//   - gRPC-Web wrapping (small wrapper; phase 2b).
 //   - Streaming-RPC failover after partial response (the subscription hub
 //     in phase 5 covers this for ChainStream specifically).
 package cosmos_grpc

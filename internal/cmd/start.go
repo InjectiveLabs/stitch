@@ -76,6 +76,7 @@ func startCmd() *cobra.Command {
 				HedgeAfter:        cfg.Policies.Hedging.HedgeAfter,
 			})
 			grpcDirector := cosmos_grpc.NewDirector(selCore, cmgr, grpcPool)
+			grpcDirector.SetFailoverPolicy(cfg.Policies.Failover.MaxAttempts, cfg.Policies.Failover.PerAttemptTimeout)
 
 			log.L().Info("stitch starting",
 				"version", version,
@@ -110,6 +111,7 @@ func startCmd() *cobra.Command {
 
 			if cfg.Listen.RPC.Enabled() {
 				cmtSrv := cmt_rpc.New(cfg.Listen.RPC.Addr, fwd)
+				cmtSrv.SetWebSocketSelector(selCore)
 				cmtSrv.SetHashCache(hashIdx)
 				if cfg.Policies.Cache.Enabled {
 					cmtSrv.SetResponseCache(respCache, headFn, cfg.Policies.Cache.ConfirmationDepth, cfg.Policies.Cache.TTL)
@@ -125,6 +127,10 @@ func startCmd() *cobra.Command {
 					return fmt.Errorf("cosmos_grpc: %w", err)
 				}
 				mgr.Add(gs)
+				if cfg.Listen.GRPCWeb.Enabled() {
+					web := gs.WebHandler(cosmos_grpc.WebOptions{AllowedOrigins: cfg.Listen.GRPCWeb.AllowedOrigins}, cosmos_rest.New("", fwd).Handler())
+					mgr.Add(server.NewHTTP("cosmos_grpc_web", cfg.Listen.GRPCWeb.Addr, web))
+				}
 			}
 			if cfg.Listen.EthRPC.Enabled() {
 				ethSrv := eth_rpc.New(cfg.Listen.EthRPC.Addr, fwd)

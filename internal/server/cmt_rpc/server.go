@@ -1,5 +1,4 @@
-// Package cmt_rpc is the CometBFT RPC listener (URI + JSON-RPC over HTTP).
-// WebSocket support arrives in phase 5 with the subscription hub.
+// Package cmt_rpc is the CometBFT RPC listener (HTTP and WebSocket).
 package cmt_rpc
 
 import (
@@ -9,26 +8,30 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/InjectiveLabs/stitch/internal/cache"
 	"github.com/InjectiveLabs/stitch/internal/forwarder"
 	"github.com/InjectiveLabs/stitch/internal/log"
 	"github.com/InjectiveLabs/stitch/internal/runtime"
+	"github.com/InjectiveLabs/stitch/internal/selector"
 	"github.com/InjectiveLabs/stitch/internal/server"
 	"github.com/InjectiveLabs/stitch/internal/types"
 )
 
 // Server is the CometBFT RPC listener.
 type Server struct {
-	addr      string
-	fwd       *forwarder.HTTP
-	cache     *cache.HashIndex
-	respCache *cache.ResponseCache
-	head      cache.HeadProvider
-	confDepth int64
-	cacheTTL  time.Duration
-	srv       *http.Server
+	addr       string
+	fwd        *forwarder.HTTP
+	cache      *cache.HashIndex
+	respCache  *cache.ResponseCache
+	head       cache.HeadProvider
+	confDepth  int64
+	cacheTTL   time.Duration
+	srv        *http.Server
+	wsSelector selector.Selector
+	wsTracker  *server.ConnTracker
 }
 
 // SetHashCache attaches a shared hash→height index for memoization on
@@ -45,10 +48,10 @@ func (s *Server) SetResponseCache(c *cache.ResponseCache, head cache.HeadProvide
 }
 
 func New(addr string, fwd *forwarder.HTTP) *Server {
-	s := &Server{addr: addr, fwd: fwd}
+	s := &Server{addr: addr, fwd: fwd, wsTracker: server.NewConnTracker()}
 	mux := http.NewServeMux()
 	mux.Handle("/", s)
-	mux.HandleFunc("/websocket", websocketStub)
+	mux.HandleFunc("/websocket", s.serveWebSocket)
 	s.srv = &http.Server{
 		Addr:              addr,
 		Handler:           mux,
@@ -67,7 +70,13 @@ func (s *Server) Start(_ context.Context) error {
 	return nil
 }
 
-func (s *Server) Shutdown(ctx context.Context) error { return s.srv.Shutdown(ctx) }
+func (s *Server) Shutdown(ctx context.Context) error {
+	err := s.srv.Shutdown(ctx)
+	if wsErr := s.wsTracker.SweepAndWait(ctx); err == nil {
+		err = wsErr
+	}
+	return err
+}
 
 // Handler returns the http.Handler the listener uses. Exported for tests
 // (httptest.NewServer needs a handler, not a *http.Server).
@@ -131,10 +140,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			cacheKey := cache.BuildKey(protocol, d.key.Method, height, cache.HashParams(params))
 			if hit, ok := s.respCache.Get(cacheKey); ok {
 				response := hit
-				var valid bool
-				if d.uri {
-					valid = cache.IsSuccessfulResponse(hit)
-				} else {
+				valid := cmtCacheableResponse(d.key.Method, hit)
+				if !d.uri && valid {
 					response, valid = cache.ResponseWithID(hit, d.id)
 				}
 				if valid {
@@ -149,7 +156,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			cap.Header().Set("x-stitch-cache", "miss")
 			dispatch(cap, r, d.key)
 			cap.FlushTo(w)
-			if cap.Status() >= 200 && cap.Status() < 300 && cache.IsSuccessfulResponse(cap.BodyBytes()) {
+			if cap.Status() >= 200 && cap.Status() < 300 && cmtCacheableResponse(d.key.Method, cap.BodyBytes()) {
 				s.respCache.Set(cacheKey, cap.BodyBytes(), s.cacheTTL)
 			}
 			if s.cache != nil && cmtPopulatable(d.key.Method) {
@@ -167,6 +174,34 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	dispatch(w, r, d.key)
+}
+
+// ABCI application errors are nested inside an otherwise successful JSON-RPC
+// envelope. In particular, a missing historical version must not be cached
+// after all candidate shards fail: retained state can become available later.
+func cmtCacheableResponse(method string, body []byte) bool {
+	if !cache.IsSuccessfulResponse(body) {
+		return false
+	}
+	if method != "abci_query" {
+		return true
+	}
+	var envelope struct {
+		Result struct {
+			Response *struct {
+				Code json.RawMessage `json:"code"`
+			} `json:"response"`
+		} `json:"result"`
+	}
+	if json.Unmarshal(body, &envelope) != nil || envelope.Result.Response == nil {
+		return false
+	}
+	code := bytes.TrimSpace(envelope.Result.Response.Code)
+	if len(code) == 0 {
+		return true // CometBFT may omit the zero code.
+	}
+	value, err := strconv.ParseUint(unquoteRaw(code), 10, 32)
+	return err == nil && value == 0
 }
 
 func (s *Server) applyHashCache(d *decoded) {
@@ -199,12 +234,6 @@ func cmtPopulatable(method string) bool {
 		return true
 	}
 	return false
-}
-
-func websocketStub(w http.ResponseWriter, _ *http.Request) {
-	w.Header().Set("content-type", "application/json")
-	w.WriteHeader(http.StatusNotImplemented)
-	_, _ = w.Write([]byte(`{"error":"/websocket arrives in phase 5 (subscription hub)"}`))
 }
 
 func writeJSONRPCError(w http.ResponseWriter, status int, msg string) {
