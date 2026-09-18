@@ -50,7 +50,7 @@ func (f *HTTP) Hedge(w http.ResponseWriter, r *http.Request, key types.RouteKey)
 		bodyBytes, err = io.ReadAll(r.Body)
 		_ = r.Body.Close()
 		if err != nil {
-			writeJSONError(w, http.StatusBadRequest, "read body: "+err.Error())
+			writeJSONError(w, http.StatusBadRequest, "read body: "+log.ErrorMessage(err))
 			return
 		}
 	}

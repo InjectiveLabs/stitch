@@ -91,7 +91,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	d, err := decode(r)
 	if err != nil {
-		writeJSONRPCError(w, http.StatusBadRequest, err.Error())
+		writeJSONRPCError(w, http.StatusBadRequest, log.ErrorMessage(err))
 		return
 	}
 	ctx = log.WithMethod(ctx, d.key.Method)

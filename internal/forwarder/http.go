@@ -63,7 +63,7 @@ type ErrAllAttemptsFailed struct {
 }
 
 func (e *ErrAllAttemptsFailed) Error() string {
-	return fmt.Sprintf("all %d attempts failed: %v", e.Attempts, e.Last)
+	return fmt.Sprintf("all %d attempts failed: %s", e.Attempts, log.ErrorMessage(e.Last))
 }
 
 func (e *ErrAllAttemptsFailed) Unwrap() error { return e.Last }
@@ -86,7 +86,7 @@ func (f *HTTP) Forward(w http.ResponseWriter, r *http.Request, key types.RouteKe
 		bodyBytes, err = io.ReadAll(r.Body)
 		_ = r.Body.Close()
 		if err != nil {
-			writeJSONError(w, http.StatusBadRequest, "read body: "+err.Error())
+			writeJSONError(w, http.StatusBadRequest, "read body: "+log.ErrorMessage(err))
 			return
 		}
 	}
@@ -165,7 +165,7 @@ func (f *HTTP) Forward(w http.ResponseWriter, r *http.Request, key types.RouteKe
 			metrics.FailoverAttempts.WithLabelValues(b.Name, "next", classifyErr(err)).Inc()
 			log.FromCtx(r.Context()).Warn("upstream attempt failed",
 				"backend", b.Name,
-				"err", err.Error(),
+				"err", log.ErrorMessage(err),
 				"attempt", attempts,
 			)
 			continue
@@ -213,7 +213,7 @@ func (f *HTTP) Forward(w http.ResponseWriter, r *http.Request, key types.RouteKe
 			metrics.RequestDuration.WithLabelValues(string(key.Protocol), key.Class.String(), b.Name).Observe(dur.Seconds())
 			log.FromCtx(r.Context()).Warn("upstream body truncated mid-relay",
 				"backend", b.Name,
-				"err", body.err.Error(),
+				"err", log.ErrorMessage(body.err),
 				"attempt", attempts,
 			)
 			return
@@ -227,7 +227,7 @@ func (f *HTTP) Forward(w http.ResponseWriter, r *http.Request, key types.RouteKe
 			metrics.RequestDuration.WithLabelValues(string(key.Protocol), key.Class.String(), b.Name).Observe(dur.Seconds())
 			log.FromCtx(r.Context()).Debug("client write failed mid-relay",
 				"backend", b.Name,
-				"err", copyErr.Error(),
+				"err", log.ErrorMessage(copyErr),
 			)
 			return
 		}
@@ -250,9 +250,9 @@ func (f *HTTP) Forward(w http.ResponseWriter, r *http.Request, key types.RouteKe
 	}
 	log.FromCtx(r.Context()).Error("all upstream attempts failed",
 		"attempts", attempts,
-		"err", lastErr.Error(),
+		"err", log.ErrorMessage(lastErr),
 	)
-	writeJSONError(w, http.StatusBadGateway, lastErr.Error())
+	writeJSONError(w, http.StatusBadGateway, log.ErrorMessage(lastErr))
 	metrics.RequestsTotal.WithLabelValues(string(key.Protocol), key.Class.String(), "-", "all_failed").Inc()
 }
 
