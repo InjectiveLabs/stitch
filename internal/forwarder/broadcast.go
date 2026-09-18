@@ -45,7 +45,7 @@ func (f *HTTP) Broadcast(w http.ResponseWriter, r *http.Request, key types.Route
 		bodyBytes, err = io.ReadAll(r.Body)
 		_ = r.Body.Close()
 		if err != nil {
-			writeJSONError(w, http.StatusBadRequest, "read body: "+err.Error())
+			writeJSONError(w, http.StatusBadRequest, "read body: "+log.ErrorMessage(err))
 			return
 		}
 	}
@@ -196,12 +196,12 @@ func pickErrReport(failures []broadcastResult) string {
 	// Prefer transport errors (most informative); fall back to first 5xx.
 	for _, f := range failures {
 		if f.err != nil && !errors.Is(f.err, context.Canceled) {
-			return fmt.Sprintf("backend %s: %v", f.backend, f.err)
+			return fmt.Sprintf("backend %s: %s", f.backend, log.ErrorMessage(f.err))
 		}
 	}
 	for _, f := range failures {
 		if f.err != nil {
-			return fmt.Sprintf("backend %s: %v", f.backend, f.err)
+			return fmt.Sprintf("backend %s: %s", f.backend, log.ErrorMessage(f.err))
 		}
 	}
 	for _, f := range failures {
@@ -217,7 +217,7 @@ func failureReports(failures []broadcastResult) []string {
 	for _, f := range failures {
 		switch {
 		case f.err != nil:
-			out = append(out, fmt.Sprintf("%s: %v", f.backend, f.err))
+			out = append(out, fmt.Sprintf("%s: %s", f.backend, log.ErrorMessage(f.err)))
 		case f.resp != nil:
 			out = append(out, fmt.Sprintf("%s: status %d", f.backend, f.resp.StatusCode))
 		default:
