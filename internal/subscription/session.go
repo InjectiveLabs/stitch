@@ -130,11 +130,15 @@ func (a *ethAdapter) SessionLabels() (string, string) { return string(types.Prot
 func (a *ethAdapter) ResumeReason() string { return "upstream_close" }
 
 // HandleClientFrame inspects an incoming client frame and either:
+//   - rejects batches containing subscription methods before any forwarding
 //   - intercepts an eth_subscribe (records pending) and forwards a
 //     stitch-issued copy to upstream
 //   - intercepts an eth_unsubscribe by synthetic ID and rewrites it
 //   - or forwards with an internal numeric ID, restoring the client ID on reply
 func (a *ethAdapter) HandleClientFrame(io sessionIO, msg []byte) error {
+	if handled, err := rejectEthSubscriptionBatch(io, msg); handled {
+		return err
+	}
 	var probe struct {
 		ID     json.RawMessage `json:"id"`
 		Method string          `json:"method"`

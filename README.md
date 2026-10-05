@@ -346,6 +346,12 @@ height; request payloads and upstream error messages are omitted.
 
 ### Subscription resume
 
+Send `eth_subscribe` and `eth_unsubscribe` as individual WebSocket requests.
+Stitch rejects any batch containing either method before forwarding any member,
+including ordinary calls in a mixed batch. Valid requests receive a `-32000`
+error with their original IDs in a batch response; notifications receive no
+reply. Ordinary RPC batches remain supported.
+
 When a client opens an `eth_subscribe newHeads`, stitch:
 
 1. Mints a synthetic subscription ID and returns it to the client.
