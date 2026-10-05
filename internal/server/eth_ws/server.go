@@ -41,6 +41,11 @@ type Server struct {
 	tracker  *server.ConnTracker
 
 	subOpts SubscriptionOptions
+
+	// Keep quiet client connections active through proxies independently of
+	// upstream heartbeats. Tests shorten these intervals before serving.
+	clientPingInterval  time.Duration
+	clientPingWriteWait time.Duration
 }
 
 // SubscriptionOptions mirrors the policies.subscriptions knobs this
@@ -66,7 +71,9 @@ func New(addr string, sel selector.Selector) *Server {
 			ReadBufferSize:   4096,
 			WriteBufferSize:  4096,
 		},
-		tracker: server.NewConnTracker(),
+		tracker:             server.NewConnTracker(),
+		clientPingInterval:  20 * time.Second,
+		clientPingWriteWait: 5 * time.Second,
 	}
 	s.srv = &http.Server{
 		Addr:              addr,
@@ -138,6 +145,16 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer s.tracker.Untrack(clientConn)
+	stopPing := make(chan struct{})
+	pingDone := make(chan struct{})
+	go func() {
+		defer close(pingDone)
+		s.pingClient(clientConn, stopPing)
+	}()
+	defer func() {
+		close(stopPing)
+		<-pingDone
+	}()
 
 	sess := subscription.NewSession(clientConn, subscription.SessionConfig{
 		Selector:      s.selector,
@@ -146,6 +163,26 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	})
 	if err := sess.Run(ctx); err != nil {
 		log.FromCtx(ctx).Debug("eth_ws: session ended", "err", err.Error())
+	}
+}
+
+// pingClient sends control frames through the entire downstream WebSocket
+// path, including TLS-terminating proxies. It uses WriteControl's own deadline
+// and concurrency guarantee, never the session's ordinary data-write methods.
+// A failed write closes the client so the session reader tears down upstream.
+func (s *Server) pingClient(conn *websocket.Conn, stop <-chan struct{}) {
+	ticker := time.NewTicker(s.clientPingInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-ticker.C:
+			if err := conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(s.clientPingWriteWait)); err != nil {
+				_ = conn.Close()
+				return
+			}
+		}
 	}
 }
 
