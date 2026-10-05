@@ -1,9 +1,11 @@
 package subscription
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -95,19 +97,21 @@ func (s *Session) Backend() string {
 //   - Notifications for unknown upstream ids are dropped (and counted) —
 //     they belong to a dead epoch or an unsubscribed sub.
 type ethAdapter struct {
-	mu      sync.Mutex
-	subs    map[string]*Sub   // synthetic ID → sub
-	upToSyn map[string]string // upstream-minted ID → synthetic ID
-	pending map[string]*Sub   // our outgoing JSON-RPC id → pending sub awaiting response
-	synSeq  atomic.Uint64
-	idSeq   atomic.Uint64
+	mu         sync.Mutex
+	subs       map[string]*Sub            // synthetic ID → sub
+	upToSyn    map[string]string          // upstream-minted ID → synthetic ID
+	pending    map[string]*Sub            // our outgoing JSON-RPC id → pending sub awaiting response
+	rpcPending map[string]json.RawMessage // outgoing id → client id; nil swallows a locally acknowledged unsubscribe
+	synSeq     atomic.Uint64
+	idSeq      atomic.Uint64
 }
 
 func newEthAdapter() *ethAdapter {
 	return &ethAdapter{
-		subs:    make(map[string]*Sub),
-		upToSyn: make(map[string]string),
-		pending: make(map[string]*Sub),
+		subs:       make(map[string]*Sub),
+		upToSyn:    make(map[string]string),
+		pending:    make(map[string]*Sub),
+		rpcPending: make(map[string]json.RawMessage),
 	}
 }
 
@@ -129,7 +133,7 @@ func (a *ethAdapter) ResumeReason() string { return "upstream_close" }
 //   - intercepts an eth_subscribe (records pending) and forwards a
 //     stitch-issued copy to upstream
 //   - intercepts an eth_unsubscribe by synthetic ID and rewrites it
-//   - or forwards verbatim
+//   - or forwards with an internal numeric ID, restoring the client ID on reply
 func (a *ethAdapter) HandleClientFrame(io sessionIO, msg []byte) error {
 	var probe struct {
 		ID     json.RawMessage `json:"id"`
@@ -144,7 +148,17 @@ func (a *ethAdapter) HandleClientFrame(io sessionIO, msg []byte) error {
 	case "eth_unsubscribe":
 		return a.handleClientUnsubscribe(io, probe.ID, probe.Params)
 	default:
-		return io.upstreamWrite(msg)
+		out, err := rewriteRPCIDs(msg, func(clientID json.RawMessage) (json.RawMessage, bool) {
+			internalID := a.nextID()
+			a.mu.Lock()
+			a.rpcPending[internalID.String()] = append(json.RawMessage(nil), clientID...)
+			a.mu.Unlock()
+			return json.RawMessage(internalID.String()), true
+		})
+		if err != nil {
+			return err
+		}
+		return io.upstreamWrite(out)
 	}
 }
 
@@ -166,7 +180,7 @@ func (a *ethAdapter) handleClientSubscribe(io sessionIO, clientID, params json.R
 
 	a.mu.Lock()
 	a.subs[syn] = sub
-	a.pending[internalID] = sub
+	a.pending[internalID.String()] = sub
 	a.mu.Unlock()
 
 	out, err := json.Marshal(map[string]any{
@@ -202,9 +216,13 @@ func (a *ethAdapter) handleClientUnsubscribe(io sessionIO, clientID, params json
 		return io.clientReplyBool(clientID, false)
 	}
 	if upID != "" {
+		internalID := a.nextID()
+		a.mu.Lock()
+		a.rpcPending[internalID.String()] = nil
+		a.mu.Unlock()
 		out, _ := json.Marshal(map[string]any{
 			"jsonrpc": "2.0",
-			"id":      a.nextID(),
+			"id":      internalID,
 			"method":  "eth_unsubscribe",
 			"params":  []string{upID},
 		})
@@ -216,7 +234,7 @@ func (a *ethAdapter) handleClientUnsubscribe(io sessionIO, clientID, params json
 // HandleUpstreamFrame inspects a frame from upstream:
 //   - notification: translate id, dedup, forward
 //   - response with our internal id: bind synthetic, reply to client
-//   - other response: forward verbatim (may be eth_call etc.)
+//   - ordinary response: restore the client ID (may be eth_call etc.)
 func (a *ethAdapter) HandleUpstreamFrame(io sessionIO, msg []byte) error {
 	var probe struct {
 		ID     json.RawMessage `json:"id"`
@@ -241,7 +259,22 @@ func (a *ethAdapter) HandleUpstreamFrame(io sessionIO, msg []byte) error {
 			return a.handleUpstreamSubscribeResp(io, pending, probe.Result)
 		}
 	}
-	return io.clientWrite(msg)
+	out, err := rewriteRPCIDs(msg, func(internalID json.RawMessage) (json.RawMessage, bool) {
+		a.mu.Lock()
+		clientID, ok := a.rpcPending[unquoteID(internalID)]
+		if ok {
+			delete(a.rpcPending, unquoteID(internalID))
+		}
+		a.mu.Unlock()
+		if !ok {
+			return internalID, true
+		}
+		return clientID, clientID != nil
+	})
+	if err != nil || len(out) == 0 {
+		return err
+	}
+	return io.clientWrite(out)
 }
 
 func (a *ethAdapter) handleUpstreamNotification(io sessionIO, msg []byte) error {
@@ -320,6 +353,10 @@ func (a *ethAdapter) handleUpstreamSubscribeResp(io sessionIO, sub *Sub, result 
 // can't sneak through. Aborts on the first write error and returns it.
 func (a *ethAdapter) ReplaySubs(_ context.Context, io sessionIO) error {
 	a.mu.Lock()
+	// The engine has joined the old upstream reader before entering this
+	// epoch. Ordinary calls are not replayed, and their replies can no longer
+	// arrive, so discard their correlation entries (including unsubscribe acks).
+	clear(a.rpcPending)
 	subs := make([]*Sub, 0, len(a.subs))
 	for _, sub := range a.subs {
 		if sub.Resumable {
@@ -338,7 +375,7 @@ func (a *ethAdapter) ReplaySubs(_ context.Context, io sessionIO) error {
 		// Stale pending entries from never-acked epochs are deliberately
 		// retained: they serve the late-notification fallback window, ids
 		// never collide, and the cost is memory-only, bounded by flap count.
-		a.pending[internalID] = sub
+		a.pending[internalID.String()] = sub
 		a.mu.Unlock()
 		out, _ := json.Marshal(map[string]any{
 			"jsonrpc": "2.0",
@@ -371,8 +408,55 @@ func (a *ethAdapter) mintSynthetic() string {
 	return fmt.Sprintf("0x%016x", a.synSeq.Add(1))
 }
 
-func (a *ethAdapter) nextID() string {
-	return fmt.Sprintf("stitch_%d", a.idSeq.Add(1))
+func (a *ethAdapter) nextID() json.Number {
+	// Injective's EVM WebSocket server requires numeric request IDs. Keep our
+	// sequence separate from client IDs, including ordinary calls, so a client
+	// request cannot collide with a pending subscribe or replay response.
+	return json.Number(strconv.FormatUint(a.idSeq.Add(1), 10))
+}
+
+// rewriteRPCIDs preserves raw IDs (including numbers above 2^53) and batch
+// response shapes without decoding any JSON number through float64. Notifications
+// and malformed frames are left untouched. keep=false drops an internal reply.
+func rewriteRPCIDs(msg []byte, rewrite func(json.RawMessage) (json.RawMessage, bool)) ([]byte, error) {
+	trimmed := bytes.TrimSpace(msg)
+	if len(trimmed) == 0 {
+		return msg, nil
+	}
+	if trimmed[0] == '[' {
+		var batch []json.RawMessage
+		if err := json.Unmarshal(msg, &batch); err != nil || len(batch) == 0 {
+			return msg, nil
+		}
+		out := make([]json.RawMessage, 0, len(batch))
+		for _, item := range batch {
+			rewritten, err := rewriteRPCIDs(item, rewrite)
+			if err != nil {
+				return nil, err
+			}
+			if len(rewritten) > 0 {
+				out = append(out, rewritten)
+			}
+		}
+		if len(out) == 0 {
+			return nil, nil
+		}
+		return json.Marshal(out)
+	}
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(msg, &envelope); err != nil {
+		return msg, nil
+	}
+	id, exists := envelope["id"]
+	if !exists {
+		return msg, nil
+	}
+	replacement, keep := rewrite(id)
+	if !keep {
+		return nil, nil
+	}
+	envelope["id"] = replacement
+	return json.Marshal(envelope)
 }
 
 // readSubscribeKind reads params[0] of an eth_subscribe request.
