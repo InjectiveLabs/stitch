@@ -105,12 +105,13 @@ func newHeartbeatRig(t *testing.T, interval time.Duration) *heartbeatRig {
 			}
 			var result any = "0x59f"
 			var kind string
-			if call.Method == "eth_subscribe" {
+			switch call.Method {
+			case "eth_subscribe":
 				if len(call.Params) > 0 {
 					_ = json.Unmarshal(call.Params[0], &kind)
 				}
 				result = "0x" + kind
-			} else if call.Method == "eth_unsubscribe" {
+			case "eth_unsubscribe":
 				result = true
 			}
 			if err := c.WriteJSON(map[string]any{"jsonrpc": "2.0", "id": call.ID, "result": result}); err != nil {
