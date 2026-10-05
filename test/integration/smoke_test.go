@@ -34,10 +34,13 @@ type upstream struct {
 	srv    *httptest.Server
 }
 
-func newUpstream(name string, height int64) *upstream {
+func newUpstream(name string, height int64, beforeReply func(*http.Request)) *upstream {
 	u := &upstream{name: name, height: height}
 	u.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		u.hits.Add(1)
+		if beforeReply != nil {
+			beforeReply(r)
+		}
 		if u.dead.Load() {
 			w.WriteHeader(503)
 			return
@@ -77,8 +80,13 @@ func (r *testRig) close() {
 
 func setup(t *testing.T) *testRig {
 	t.Helper()
-	a := newUpstream("archive", 100000)
-	s := newUpstream("shard1", 100000)
+	return setupWithReplyHook(t, nil)
+}
+
+func setupWithReplyHook(t *testing.T, beforeReply func(*http.Request)) *testRig {
+	t.Helper()
+	a := newUpstream("archive", 100000, beforeReply)
+	s := newUpstream("shard1", 100000, beforeReply)
 
 	bs := []*backend.Backend{
 		{
@@ -225,7 +233,20 @@ func TestRESTHeightFromHeader(t *testing.T) {
 }
 
 func TestBroadcastFanOutHitsAllHealthyBackends(t *testing.T) {
-	rig := setup(t)
+	// Broadcast returns the first success and cancels the other legs. Hold
+	// both fixture replies until both requests arrive so this tests fan-out
+	// dispatch, rather than racing the winner against the second HTTP dial.
+	var arrived atomic.Int32
+	bothArrived := make(chan struct{})
+	rig := setupWithReplyHook(t, func(r *http.Request) {
+		if arrived.Add(1) == 2 {
+			close(bothArrived)
+		}
+		select {
+		case <-bothArrived:
+		case <-r.Context().Done():
+		}
+	})
 	defer rig.close()
 
 	body := strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"broadcast_tx_sync","params":{"tx":"AAA="}}`)
