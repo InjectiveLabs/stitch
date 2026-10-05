@@ -345,6 +345,15 @@ type wsResponse struct {
 
 func (w *wsResponse) Header() http.Header { return w.header }
 func (w *wsResponse) WriteHeader(int)     {}
+
+// ResetResponse keeps HTTP query failures inside the WebSocket response buffer;
+// the forwarder must not try to abort a hijacked HTTP connection.
+func (w *wsResponse) ResetResponse(headers http.Header) {
+	w.header = headers.Clone()
+	w.body.Reset()
+	w.overflow = false
+}
+
 func (w *wsResponse) Write(b []byte) (int, error) {
 	if len(b) > wsReadLimit-w.body.Len() {
 		w.overflow = true

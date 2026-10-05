@@ -280,16 +280,22 @@ func TestForwardTruncatedUpstreamRecordsFailure(t *testing.T) {
 
 	cm := newTestCircuit()
 	fwd := newForwarderWithCircuit(stubSelector{cands: []*backend.Backend{mkBackend("trunc", upstream.URL)}}, cm, 1)
+	front := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fwd.Forward(w, r, types.RouteKey{Protocol: types.ProtoRPC, Method: "status", Class: types.ClassLatest, Idempotent: true})
+	}))
+	defer front.Close()
 
 	before := testutil.ToFloat64(metrics.RelayTruncated.WithLabelValues("trunc", string(types.ProtoRPC)))
 	reqBefore := testutil.ToFloat64(metrics.RequestsTotal.WithLabelValues(string(types.ProtoRPC), types.ClassLatest.String(), "trunc", "2xx"))
 	durBefore := requestDurationCount(t, string(types.ProtoRPC), types.ClassLatest.String(), "trunc")
 	for i := 0; i < 2; i++ {
-		rec := httptest.NewRecorder()
-		r := httptest.NewRequest(http.MethodGet, "/status", nil)
-		fwd.Forward(rec, r, types.RouteKey{Protocol: types.ProtoRPC, Method: "status", Class: types.ClassLatest, Idempotent: true})
-		if rec.Code != 200 {
-			t.Fatalf("headers were already relayed; expected 200, got %d", rec.Code)
+		resp, err := front.Client().Get(front.URL + "/status")
+		if err == nil {
+			_, readErr := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			if readErr == nil {
+				t.Fatal("truncated relay finished without a transport error")
+			}
 		}
 	}
 
