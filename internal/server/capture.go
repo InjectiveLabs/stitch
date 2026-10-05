@@ -31,6 +31,14 @@ func (c *Capture) Header() http.Header         { return c.header }
 func (c *Capture) WriteHeader(code int)        { c.status = code }
 func (c *Capture) Write(b []byte) (int, error) { return c.body.Write(b) }
 
+// ResetResponse discards a failed upstream attempt before anything is flushed.
+// Restore caller-owned headers, excluding headers copied from that attempt.
+func (c *Capture) ResetResponse(headers http.Header) {
+	c.header = headers.Clone()
+	c.status = http.StatusOK
+	c.body.Reset()
+}
+
 // Status returns the captured status code (200 if WriteHeader was never
 // called).
 func (c *Capture) Status() int { return c.status }

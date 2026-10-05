@@ -68,11 +68,23 @@ func (e *ErrAllAttemptsFailed) Error() string {
 
 func (e *ErrAllAttemptsFailed) Unwrap() error { return e.Last }
 
+// bufferedResponse has not committed anything to a client. ResetResponse
+// discards an attempt's status and body and restores the pre-attempt headers,
+// allowing a retry or a complete error response without leaking partial data.
+type bufferedResponse interface {
+	ResetResponse(http.Header)
+}
+
 // Forward proxies r to upstream, choosing an endpoint URL per candidate by
 // joining the candidate's protocol-specific base with r.URL.Path + r.URL.RawQuery.
 //
 // The original r.Body is buffered once so that retries can replay it.
 func (f *HTTP) Forward(w http.ResponseWriter, r *http.Request, key types.RouteKey) {
+	buffered, canReset := w.(bufferedResponse)
+	var initialHeaders http.Header
+	if canReset {
+		initialHeaders = w.Header().Clone()
+	}
 	candidates := f.selector.Candidates(key)
 	if len(candidates) == 0 {
 		writeJSONError(w, http.StatusServiceUnavailable, "no eligible backend")
@@ -203,20 +215,43 @@ func (f *HTTP) Forward(w http.ResponseWriter, r *http.Request, key types.RouteKe
 		cancel()
 
 		if body.err != nil {
-			// Upstream died mid-body. Headers (and part of the body) are
-			// already written, so the response cannot be salvaged — debit
-			// the breaker and stop. The request still terminated through
-			// this backend: count it in the primary traffic metrics.
+			if canReset {
+				buffered.ResetResponse(initialHeaders)
+			}
+			if r.Context().Err() != nil {
+				// A downstream cancellation can interrupt the upstream read.
+				// It says nothing about the backend's health.
+				f.circuit.Release(b.Name, key.Protocol)
+				if canReset {
+					writeJSONError(w, http.StatusBadGateway, "request canceled")
+					return
+				}
+				panic(http.ErrAbortHandler)
+			}
 			f.circuit.Record(b.Name, key.Protocol, false)
 			metrics.RelayTruncated.WithLabelValues(b.Name, string(key.Protocol)).Inc()
-			metrics.RequestsTotal.WithLabelValues(string(key.Protocol), key.Class.String(), b.Name, statusBucket(resp.StatusCode)).Inc()
-			metrics.RequestDuration.WithLabelValues(string(key.Protocol), key.Class.String(), b.Name).Observe(dur.Seconds())
 			log.FromCtx(r.Context()).Warn("upstream body truncated mid-relay",
 				"backend", b.Name,
 				"err", log.ErrorMessage(body.err),
 				"attempt", attempts,
 			)
-			return
+			if !canReset {
+				// Only the streamed response actually exposed this status.
+				// Buffered attempts count below as failures, with a single
+				// final request outcome recorded on success or exhaustion.
+				metrics.RequestsTotal.WithLabelValues(string(key.Protocol), key.Class.String(), b.Name, statusBucket(resp.StatusCode)).Inc()
+				metrics.RequestDuration.WithLabelValues(string(key.Protocol), key.Class.String(), b.Name).Observe(time.Since(started).Seconds())
+				// The real HTTP writer may already have sent headers/body.
+				// Abort the connection (or HTTP/2 stream), so net/http cannot
+				// turn this partial response into a cleanly finished success.
+				panic(http.ErrAbortHandler)
+			}
+			lastErr = body.err
+			lastHistorical = nil
+			metrics.FailoverAttempts.WithLabelValues(b.Name, "next", classifyErr(body.err)).Inc()
+			// The existing candidate loop enforces coverage, idempotency,
+			// cancellation and MaxAttempts. No bytes have left the buffer.
+			continue
 		}
 		if copyErr != nil {
 			// Only the client-side write failed; the upstream served fine.

@@ -317,6 +317,24 @@ func (s *Server) handleBatch(w http.ResponseWriter, r *http.Request, body []byte
 		rec := server.NewCapture(parentHeader)
 		s.handleSingle(rec, r, raw[i])
 		results[i] = rec.BodyBytes()
+		if rec.Status() < 200 || rec.Status() >= 300 {
+			// HTTP forwarding errors are plain JSON. Inside a batch they
+			// need a JSON-RPC envelope and the original item's request ID.
+			// Preserve errors already framed by the JSON-RPC handler.
+			var response struct {
+				JSONRPC string          `json:"jsonrpc"`
+				Error   json.RawMessage `json:"error"`
+			}
+			if json.Unmarshal(results[i], &response) == nil && response.JSONRPC == "2.0" &&
+				len(response.Error) > 0 && response.Error[0] == '{' {
+				continue
+			}
+			var request jsonRPCRequest
+			if json.Unmarshal(raw[i], &request) != nil || !cache.IsJSONRPCID(request.ID) {
+				request.ID = nil
+			}
+			results[i] = jsonRPCErrorBytes(request.ID, -32000, "upstream request failed")
+		}
 	}
 
 	w.WriteHeader(http.StatusOK)
